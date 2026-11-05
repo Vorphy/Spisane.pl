@@ -1,6 +1,7 @@
 """
 Notatnik spotkań – nagrywanie rozmów (głośniki + mikrofon) do Opus,
-konwersja starych nagrań do Opus i kolejka transkrypcji przez fw-dd.py.
+konwersja starych nagrań do Opus i kolejka transkrypcji Whisperem
+(wbudowana: engine.py + worker.py – dawniej zewnętrzny skrypt fw-dd.py).
 
 Uruchomienie: pythonw notatnik.pyw   (albo skrót „Notatnik spotkań”)
 """
@@ -28,6 +29,7 @@ import customtkinter as ctk  # noqa: E402
 import recorder      # noqa: E402
 import converter     # noqa: E402
 import transcriber   # noqa: E402
+import engine        # noqa: E402
 
 APP_NAME = "Notatnik spotkań"
 CONFIG_PATH = APP_DIR / "config.json"
@@ -37,8 +39,8 @@ LEVEL_DIR = APP_DIR / "_wyrownane"   # tymczasowe kopie z wyrównaną głośnoś
 
 DEFAULTS = {
     "save_dir": str(Path.home() / "Videos"),
-    # fw-dd.py obok aplikacji (repo), a jeśli go tam nie ma – folder wyżej (stary układ)
-    "fwdd_path": str(APP_DIR / "fw-dd.py" if (APP_DIR / "fw-dd.py").exists() else APP_DIR.parent / "fw-dd.py"),
+    "watch_dir": str(Path.home() / "Videos"),
+    "tr_opts": {},               # opcje transkrypcji (uzupełniane domyślnymi z engine.DEFAULT_OPTIONS)
     "mic_name": None,
     "loop_name": None,
     "bitrate": 32000,
@@ -83,6 +85,9 @@ def load_config():
         cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         pass
+    cfg.pop("fwdd_path", None)   # dawny zewnętrzny skrypt – transkrypcja jest teraz wbudowana
+    cfg["tr_opts"] = {**engine.DEFAULT_OPTIONS, **{k: v for k, v in (cfg.get("tr_opts") or {}).items()
+                                                   if k in engine.DEFAULT_OPTIONS}}
     return cfg
 
 
@@ -182,7 +187,7 @@ class FileQueue(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
-        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar = self.toolbar = ctk.CTkFrame(self, fg_color="transparent")
         bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ctk.CTkButton(bar, text="＋ Pliki…", width=96, command=self.add_files).pack(side="left")
         ctk.CTkButton(bar, text="＋ Folder…", width=96, command=self.add_folder).pack(side="left", padx=6)
@@ -261,14 +266,31 @@ class FileQueue(ctk.CTkFrame):
 #  Zakładka: Transkrypcja
 # ══════════════════════════════════════════════════════════════════════════
 class TranscribeTab(FileQueue):
+    WATCH_EVERY = 3.0          # co ile sekund sprawdzać monitorowany folder (jak fw-dd.py -W)
+
     def __init__(self, master, app):
         super().__init__(master, app, "Dodaj nagrania albo cały folder.\n"
-                                      "Z folderu trafią tu pliki bez transkrypcji (.txt).")
+                                      "Z folderu trafią tu pliki bez transkrypcji (.txt).\n"
+                                      "Albo włącz monitor folderu – nowe nagrania dodadzą się same.")
         self.running = False
-        self.job = None
-        self.current = None
+        self.worker = None                 # transcriber.Worker (osobny proces z modelem)
+        self.worker_ready = False          # model załadowany
+        self.pending = None                # (row, audio) czekające na załadowanie modelu
+        self.current = None                # (row, audio) w trakcie transkrypcji
         self.preparing = None              # wiersz, dla którego trwa wyrównywanie głośności
         self.prep_cancel = threading.Event()
+        self.watching = False
+        self.ignored = set()               # pliki usunięte z listy w trakcie monitorowania
+        self._last_watch = 0.0
+
+        ctk.CTkButton(self.toolbar, text="⚙ Opcje", width=86, fg_color="transparent", border_width=1,
+                      border_color=CARD_BORDER, text_color=("gray20", "gray80"), hover_color=CARD,
+                      command=lambda: TranscribeOptions(self.app, self)).pack(side="right")
+        self.summary = ctk.CTkLabel(self, text="", anchor="w", text_color=MUTED, font=ctk.CTkFont(size=11),
+                                    cursor="hand2", wraplength=540, justify="left")
+        self.summary.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        self.summary.bind("<Button-1>", lambda e: TranscribeOptions(self.app, self))
+        self.update_summary()
 
         foot = ctk.CTkFrame(self, fg_color="transparent")
         foot.grid(row=2, column=0, sticky="ew", pady=(8, 0))
@@ -276,23 +298,68 @@ class TranscribeTab(FileQueue):
         self.live = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED,
                                  font=ctk.CTkFont(size=12, slant="italic"))
         self.live.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.watch_sw = ctk.CTkSwitch(foot, text="", command=self._watch_changed)
+        self.watch_sw.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._watch_label()
         self.pause_sw = ctk.CTkSwitch(foot, text="Nie zaczynaj nowego pliku podczas nagrywania",
                                       command=self._pause_changed)
         if app.cfg["pause_while_recording"]:
             self.pause_sw.select()
-        self.pause_sw.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.pause_sw.grid(row=2, column=0, sticky="w", pady=(6, 0))
         self.level_sw = ctk.CTkSwitch(foot, text="Wyrównaj głośność przed transkrypcją",
                                       command=self._level_changed)
         if app.cfg["level_transcribe"]:
             self.level_sw.select()
-        self.level_sw.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.level_sw.grid(row=3, column=0, sticky="w", pady=(6, 0))
         self.nr_sw = ctk.CTkSwitch(foot, text="Usuń szum tła przed transkrypcją", command=self._level_changed)
         if app.cfg["denoise_transcribe"]:
             self.nr_sw.select()
-        self.nr_sw.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.nr_sw.grid(row=4, column=0, sticky="w", pady=(6, 0))
         self.btn = ctk.CTkButton(foot, text="▶  Transkrybuj", width=150, height=36,
                                  font=ctk.CTkFont(size=14, weight="bold"), command=self.toggle)
-        self.btn.grid(row=1, column=1, rowspan=3, sticky="e", pady=(6, 0))
+        self.btn.grid(row=1, column=1, rowspan=4, sticky="e", pady=(6, 0))
+
+    # ── opcje ──
+    @property
+    def opts(self):
+        return self.app.cfg["tr_opts"]
+
+    def update_summary(self):
+        o = self.opts
+        dev = {"igpu": "grafika Intel", "cpu": f"CPU ({o['threads']} wątków, rdzenie {o['cores']})",
+               "cuda": "NVIDIA"}[o["device"]]
+        parts = [o["model"], o["language"], dev, o["format"] + ("" if o["timestamps"] else " bez czasu")]
+        if o["device"] != "igpu":
+            parts.append(f"beam {o['beam_size']}")
+        if not o["vad"]:
+            parts.append("bez VAD")
+        if o["limit_time"]:
+            parts.append(f"✂ do {o['limit_time']}")
+        self.summary.configure(text="Opcje:  " + "  ·  ".join(parts) + "   (kliknij, żeby zmienić)")
+
+    def _watch_label(self):
+        d = Path(self.app.cfg["watch_dir"])
+        self.watch_sw.configure(text=f"Monitoruj folder „{d.name or d}” (nowe nagrania od razu do transkrypcji)")
+
+    def _watch_changed(self):
+        self.watching = bool(self.watch_sw.get())
+        if self.watching:
+            d = Path(self.app.cfg["watch_dir"])
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                messagebox.showerror(APP_NAME, f"Nie mogę utworzyć folderu:\n{d}\n\n{e}", parent=self)
+                self.watch_sw.deselect()
+                self.watching = False
+                return
+            self.ignored.clear()
+            self._last_watch = 0.0
+            if not self.running:
+                self._start_running()
+        elif self.running and not self.busy and not self.next_waiting(peek=True):
+            self.running = False
+            self._idle()
+            self.live.configure(text="Monitor folderu wyłączony.")
 
     def _level_changed(self):
         self.app.cfg["level_transcribe"] = bool(self.level_sw.get())
@@ -316,41 +383,108 @@ class TranscribeTab(FileQueue):
                 or leveled_tmp(row.path).with_suffix(".transcribe_state").exists()):
             row.set_status("do wznowienia")
 
+    def remove_row(self, row):
+        if row.status != "w toku" and self.watching:
+            self.ignored.add(row.path.resolve())
+        super().remove_row(row)
+
+    def next_waiting(self, peek=False):
+        """Pierwszy plik gotowy do transkrypcji. Pliki z monitora czekają, aż skończy się ich zapis."""
+        for r in self.rows:
+            if r.status not in ("czeka", "do wznowienia"):
+                continue
+            w = getattr(r, "watcher", None)
+            if w is not None and not peek:
+                if not w.ready():
+                    r.detail.configure(text=f"{r.path.parent}   ·   {w.note}")
+                    continue
+                r.watcher = None
+                r.detail.configure(text=str(r.path.parent))
+            return r
+        return None
+
+    def _scan_watch(self):
+        if not self.watching or time.time() - self._last_watch < self.WATCH_EVERY:
+            return
+        self._last_watch = time.time()
+        rec = self.app.rec_tab.current_path()
+        known = {r.path.resolve() for r in self.rows} | self.ignored
+        new = [f for f in transcriber.watch_candidates(self.app.cfg["watch_dir"], exclude=[rec] if rec else [])
+               if f.resolve() not in known]
+        if not new:
+            return
+        before = set(self.rows)
+        self.add_paths(new)
+        for r in self.rows:
+            if r not in before and r.status == "czeka":   # przerwane (do wznowienia) – bez czekania
+                r.watcher = engine.WriteWatcher(r.path)
+
+    # ── start / stop ──
     def toggle(self):
         if self.running:
             self.running = False
+            if self.watching:
+                self.watch_sw.deselect()
+                self.watching = False
             if self.preparing:
                 self.prep_cancel.set()
                 self.btn.configure(text="Zatrzymuję…", state="disabled")
-            elif self.job:
+            elif self.pending:
+                row, _ = self.pending          # model jeszcze się ładuje – po prostu zamykamy proces
+                self.pending = None
+                self._kill_worker()
+                self._reset_row(row)
+                self.live.configure(text="Zatrzymano.")
+                self._idle()
+            elif self.current:
                 self.btn.configure(text="Zatrzymuję…", state="disabled")
                 self.live.configure(text="Zapisuję stan, żeby można było później wznowić…")
-                self.job.stop()
+                self.worker.stop()
             else:
                 self._idle()
+                self.live.configure(text="")
         else:
-            if not Path(self.app.cfg["fwdd_path"]).exists():
-                messagebox.showerror(APP_NAME, f"Nie znaleziono skryptu:\n{self.app.cfg['fwdd_path']}\n\n"
-                                               "Wskaż go w Ustawieniach.", parent=self)
+            if not self.next_waiting(peek=True):
+                messagebox.showinfo(APP_NAME, "Brak plików oczekujących na transkrypcję.\n"
+                                              "Możesz też włączyć monitor folderu.", parent=self)
                 return
-            if not self.next_waiting():
-                messagebox.showinfo(APP_NAME, "Brak plików oczekujących na transkrypcję.", parent=self)
-                return
-            self.running = True
-            self.btn.configure(text="■  Zatrzymaj", fg_color=RED, hover_color=RED_HOVER)
-            self.tick()
+            self._start_running()
+
+    def _start_running(self):
+        if not deps.ensure_transcription(self.app, self.opts["device"] == "igpu"):
+            messagebox.showerror(APP_NAME, "Bez pakietu faster-whisper transkrypcja nie zadziała.", parent=self)
+            if self.watching:
+                self.watch_sw.deselect()
+                self.watching = False
+            return
+        self.running = True
+        self.btn.configure(text="■  Zatrzymaj", fg_color=RED, hover_color=RED_HOVER)
+        self.tick()
 
     def _idle(self):
         self.btn.configure(text="▶  Transkrybuj", state="normal",
                            fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"],
                            hover_color=ctk.ThemeManager.theme["CTkButton"]["hover_color"])
 
+    def _reset_row(self, row):
+        row.set_progress(0)
+        row.action.configure(state="normal")
+        row.set_status("czeka")
+        self.on_added(row)
+
     def tick(self):
-        """Wywoływane cyklicznie – startuje kolejny plik, gdy można."""
-        if not self.running or self.job or self.preparing:
+        """Wywoływane cyklicznie – monitor folderu i start kolejnego pliku, gdy można."""
+        self._scan_watch()
+        if not self.running or self.busy:
             return
         row = self.next_waiting()
         if not row:
+            self._release_worker()
+            if self.watching:
+                waiting = any(getattr(r, "watcher", None) for r in self.rows)
+                self.live.configure(text="⏳  Nowy plik – czekam, aż skończy się zapis…" if waiting else
+                                    f"👁  Czekam na nowe nagrania w {self.app.cfg['watch_dir']}…")
+                return
             self.running = False
             self._idle()
             self.live.configure(text="Wszystkie pliki przetworzone ✓")
@@ -361,17 +495,16 @@ class TranscribeTab(FileQueue):
         if row.path == self.app.rec_tab.current_path():
             self.live.configure(text="⏸  Ten plik jest właśnie nagrywany – czekam…")
             return
-        self.current = row
         row.set_status("w toku")
         row.action.configure(state="disabled")
         level = self.app.cfg["level_transcribe"]
         denoise = self.app.cfg["denoise_transcribe"]
-        if not (level or denoise):
-            self._launch(row, row.path)
-            return
         tmp = leveled_tmp(row.path)
         if tmp.exists() and tmp.with_suffix(".transcribe_state").exists():
             self._launch(row, tmp)            # wznowienie – kopia już jest
+            return
+        if not (level or denoise) or row.path.with_suffix(".transcribe_state").exists():
+            self._launch(row, row.path)       # bez obróbki albo wznowienie oryginału
             return
         # wyrównanie głośności w tle, potem transkrypcja kopii
         self.preparing = row
@@ -397,9 +530,7 @@ class TranscribeTab(FileQueue):
     def _prepared(self, row, tmp, err):
         self.preparing = None
         if err == "stop":
-            row.set_status("czeka")
-            row.set_progress(0)
-            row.action.configure(state="normal")
+            self._reset_row(row)
             self.live.configure(text="Zatrzymano.")
             self._idle()
             return
@@ -410,77 +541,365 @@ class TranscribeTab(FileQueue):
             return
         row.set_progress(0)
         if not self.running:          # ktoś kliknął Zatrzymaj w ostatniej chwili
-            row.set_status("czeka")
-            row.action.configure(state="normal")
+            self._reset_row(row)
             self._idle()
             return
         self._launch(row, tmp)
 
+    # ── proces z modelem ──
     def _launch(self, row, audio):
+        opts = dict(self.opts)
+        if self.worker and self.worker.alive and self.worker.key == transcriber.model_key(opts):
+            if self.worker_ready:
+                self._send_job(row, audio)
+            else:
+                self.pending = (row, audio)
+            return
+        self._kill_worker()
         self.live.configure(text="Ładowanie modelu…")
         ui = self.app.ui
-        self.job = transcriber.TranscribeJob(
-            self.app.cfg["fwdd_path"], audio,
-            on_progress=lambda f: ui(lambda: row.set_progress(f)),
-            on_line=lambda s: ui(lambda: self.live.configure(text="„" + s[:110] + "”")),
-            on_done=lambda st, p: ui(lambda: self._done(row, st, p, audio)))
+        w = transcriber.Worker(lambda ev: ui(lambda: self._on_event(w, ev)))
+        self.worker, self.worker_ready, self.pending = w, False, (row, audio)
         try:
-            self.job.start()
+            w.start(opts)
         except Exception as e:
-            log_exc("transcribe start")
-            self.job = None
+            log_exc("worker start")
+            self.worker = self.pending = None
             row.set_status("błąd", str(e))
             row.action.configure(state="normal")
 
-    def _finish_leveled(self, row, tmp_txt):
-        """Kopia wyrównana przetranskrybowana -> .txt i oryginał trafiają tam, gdzie zrobiłby to fw-dd.py."""
-        import shutil
-        orig = row.path
-        dest_dir = orig.parent if orig.parent.name == "przetworzone" else orig.parent / "przetworzone"
-        dest_dir.mkdir(exist_ok=True)
-        txt = dest_dir / (orig.stem + ".txt")
-        shutil.move(str(tmp_txt), str(txt))
-        for ext in (".srt", ".vtt"):
-            extra = tmp_txt.with_suffix(ext)
-            if extra.exists():
-                shutil.move(str(extra), str(dest_dir / (orig.stem + ext)))
-        if orig.parent != dest_dir and orig.exists():
-            shutil.move(str(orig), str(dest_dir / orig.name))
-        shutil.rmtree(leveled_tmp(orig).parent, ignore_errors=True)
-        return txt
+    def _send_job(self, row, audio):
+        self.current = (row, audio)
+        self.live.configure(text="Transkrybuję…")
+        self.worker.job(audio, dict(self.opts))
 
-    def _done(self, row, status, txt, audio=None):
-        if status == "done" and txt and audio is not None and Path(audio) != row.path:
-            try:
-                txt = self._finish_leveled(row, Path(txt))
-            except Exception:
-                log_exc("finish leveled")
-        log_tail = self.job.log[-40:] if self.job else []
-        self.job = None
+    def _release_worker(self):
+        if self.worker:
+            self.worker.quit()
+        self.worker = None
+        self.worker_ready = False
+
+    def _kill_worker(self):
+        if self.worker:
+            self.worker.kill()
+        self.worker = None
+        self.worker_ready = False
+
+    def _on_event(self, w, ev):
+        if w is not self.worker:
+            return                      # zdarzenie ze starego, już zamkniętego procesu
+        kind = ev["ev"]
+        if kind == "loaded":
+            self.worker_ready = True
+            if ev["device"] != self.opts["device"]:
+                self.live.configure(text=f"Grafika niedostępna – transkrypcja na {ev['device'].upper()}")
+            if self.pending:
+                row, audio = self.pending
+                self.pending = None
+                self._send_job(row, audio)
+        elif kind == "stderr":
+            if self.pending:            # pobieranie / ładowanie modelu
+                self.live.configure(text="Ładowanie modelu (pierwszy raz pobiera ~1–3 GB)…  " + ev["line"][-60:])
+        elif kind == "log":
+            if ev["msg"].startswith(("[VAD]", "[WZNÓW]", "Przycinam", "Grafika", "[Ostrzeżenie]")):
+                self.live.configure(text=ev["msg"][:120])
+        elif kind == "progress" and self.current:
+            self.current[0].set_progress(ev["f"])
+        elif kind == "segment" and self.current:
+            self.live.configure(text="„" + ev["text"][:110] + "”")
+        elif kind == "done" and self.current:
+            row, audio = self.current
+            self.current = None
+            self._done(row, audio, ev)
+        elif kind in ("error", "exit"):
+            target = self.current or self.pending
+            self.current = self.pending = None
+            log_tail = list(w.log[-60:])
+            self._kill_worker()
+            if target:
+                msg = ev.get("msg") or f"proces transkrypcji zakończył się (kod {ev.get('code')})"
+                self._fail(target[0], msg, log_tail)
+
+    def _fail(self, row, msg, log_tail):
+        row.set_status("błąd", f"{msg[:90]}   ·   szczegóły w notatnik.log")
+        row.set_progress(0)
         row.action.configure(state="normal")
-        if status == "done":
-            row.set_status("gotowe", f"→ {txt}" if txt else None)
-            if txt:
-                row.result = txt
-                row.set_action("Otwórz", lambda p=txt: os.startfile(str(p)), width=70)
-        elif status == "stopped":
-            row.set_status("do wznowienia", "Zatrzymano – stan zapisany, kliknij Transkrybuj, by wznowić")
-            self.live.configure(text="Zatrzymano.")
-        else:
-            row.set_status("błąd", "Szczegóły w notatnik.log")
-            try:
-                with open(LOG_PATH, "a", encoding="utf-8") as f:
-                    f.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] Transkrypcja nieudana: {row.path}\n")
-                    f.write("\n".join(log_tail) + "\n")
-            except OSError:
-                pass
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] Transkrypcja nieudana: {row.path}\n{msg}\n")
+                f.write("\n".join(log_tail) + "\n")
+        except OSError:
+            pass
         if not self.running:
             self._idle()
         self.tick()
 
+    def _move_results(self, row, audio, outputs):
+        """Jak move_to_processed z fw-dd.py: wyniki i oryginał do podfolderu 'przetworzone'
+        (jeśli plik już tam leży – zostaje, bez przetworzone/przetworzone). Zwraca nowe ścieżki wyników."""
+        import shutil
+        orig = row.path
+        dest_dir = orig.parent if orig.parent.name == "przetworzone" else orig.parent / "przetworzone"
+        dest_dir.mkdir(exist_ok=True)
+        moved = []
+        for o in map(Path, outputs):
+            if o.exists():
+                dst = dest_dir / (orig.stem + o.suffix)
+                if o != dst:
+                    dst.unlink(missing_ok=True)
+                    shutil.move(str(o), str(dst))
+                moved.append(dst)
+        for st in (orig.with_suffix(".transcribe_state"), Path(audio).with_suffix(".transcribe_state")):
+            st.unlink(missing_ok=True)
+        if orig.parent != dest_dir and orig.exists():
+            dst = dest_dir / orig.name
+            dst.unlink(missing_ok=True)
+            shutil.move(str(orig), str(dst))
+        if Path(audio) != orig:
+            shutil.rmtree(leveled_tmp(orig).parent, ignore_errors=True)
+        return moved
+
+    def _done(self, row, audio, res):
+        row.action.configure(state="normal")
+        if res["status"] == "stopped":
+            row.set_status("do wznowienia", "Zatrzymano – stan zapisany, kliknij Transkrybuj, by wznowić")
+            self.live.configure(text="Zatrzymano.")
+            self._release_worker()
+            if not self.running:
+                self._idle()
+            return
+        try:
+            moved = self._move_results(row, audio, res["outputs"])
+        except Exception as e:
+            log_exc("move results")
+            moved = [Path(o) for o in res["outputs"]]
+            self.live.configure(text=f"Nie udało się przenieść do 'przetworzone': {e}")
+        stats = (f"{fmt_hms(res['duration'] or 0)} nagrania  ·  {res['segments']} segm.  ·  "
+                 f"{fmt_hms(res['elapsed'])} pracy")
+        if not moved:
+            row.set_status("gotowe", f"Brak mowy do zapisania   ·   {stats}")
+        else:
+            txt = next((p for p in moved if p.suffix == ".txt"), moved[0])
+            row.result = txt
+            row.set_status("gotowe", f"→ {txt}   ·   {stats}")
+            row.set_action("Otwórz", lambda p=txt: os.startfile(str(p)), width=70)
+        if not self.running:
+            self._idle()
+            self._release_worker()
+        self.tick()
+
     @property
     def busy(self):
-        return self.job is not None or self.preparing is not None
+        return self.current is not None or self.pending is not None or self.preparing is not None
+
+    def shutdown(self, timeout=60):
+        """Przy zamykaniu aplikacji: przerwij z zapisem stanu i poczekaj, aż proces skończy."""
+        self.running = False
+        self.prep_cancel.set()
+        w = self.worker
+        if not w or not w.alive:
+            return
+        if not self.current:
+            w.kill()
+            return
+        proc = w.proc
+        w.stop()
+        w.quit()
+        try:
+            proc.wait(timeout=timeout)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Okno: Opcje transkrypcji (dawne pytania trybu interaktywnego fw-dd.py)
+# ══════════════════════════════════════════════════════════════════════════
+class TranscribeOptions(ctk.CTkToplevel):
+    LANGS = ["pl", "en", "de", "fr", "es", "it", "uk", "ru", "cs"]
+    DEVICES = {"igpu": "Grafika Intel", "cpu": "Procesor", "cuda": "NVIDIA"}
+    CORES = {"e": "E (energooszczędne)", "p": "P (wydajne)", "all": "wszystkie", "n": "pierwsze N"}
+
+    def __init__(self, app, tab):
+        super().__init__(app)
+        self.app, self.tab = app, tab
+        self.title("Opcje transkrypcji")
+        self.geometry("660x700")
+        self.minsize(560, 420)
+        self.transient(app)
+        self.after(50, self.grab_set)
+        if ICON_PATH.exists():
+            self.after(250, lambda: self.iconbitmap(str(ICON_PATH)))
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        o = dict(engine.DEFAULT_OPTIONS, **app.cfg["tr_opts"])
+        body = self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 0))
+        body.grid_columnconfigure(1, weight=1)
+        self.r = 0
+
+        # ── model, język ──
+        self.model = ctk.CTkOptionMenu(body, width=200, values=engine.MODELS, command=lambda _: self._sync())
+        self.model.set(o["model"])
+        self.model_hint = self._place("Model Whispera", self.model, " ")
+
+        self.lang = ctk.CTkComboBox(body, width=120, values=self.LANGS)
+        self.lang.set(o["language"])
+        self._place("Język", self.lang, "kod języka nagrania, np. pl, en, de, fr")
+
+        # ── urządzenie ──
+        self.device = ctk.CTkSegmentedButton(body, values=list(self.DEVICES.values()), command=lambda _: self._sync())
+        self.device.set(self.DEVICES[o["device"]])
+        self._place("Urządzenie", self.device,
+                    "Grafika Intel Iris Xe: ok. 5–7× szybciej, niż trwa nagranie (beam 1); fragmenty pominięte "
+                    "przez model wykrywa VAD i transkrybuje ponownie. Bez grafiki Intel samo przejdzie na procesor.\n"
+                    "Procesor: ok. 3× wolniej, obsługuje beam 2+ – dla ważnych nagrań: Procesor + beam 2.")
+
+        self.compute = ctk.CTkOptionMenu(body, width=160, values=engine.COMPUTE_TYPES)
+        self.compute.set(o["compute_type"])
+        self._place("Typ obliczeń", self.compute, "int8 – najszybszy pod CPU (na grafice Intel zawsze int8)")
+
+        self.beam = ctk.CTkEntry(body, width=70)
+        self.beam.insert(0, str(o["beam_size"]))
+        self._place("Beam size", self.beam, "wyższy = dokładniejszy, ale wolniejszy (grafika Intel zawsze 1)")
+
+        self.threads = ctk.CTkEntry(body, width=70)
+        self.threads.insert(0, str(o["threads"]))
+        self._place("Wątki CPU", self.threads, "dla rdzeni P najlepiej 4")
+
+        n_p, n_e = engine.core_summary()
+        cf = ctk.CTkFrame(body, fg_color="transparent")
+        self.cores = ctk.CTkSegmentedButton(cf, values=list(self.CORES.values()), command=lambda _: self._sync())
+        self.cores.pack(side="left")
+        self.cores_n = ctk.CTkEntry(cf, width=56, placeholder_text="N")
+        self.cores_n.pack(side="left", padx=6)
+        cur = str(o["cores"])
+        self.cores.set(self.CORES.get(cur, self.CORES["n"]))
+        if cur not in self.CORES:
+            self.cores_n.insert(0, cur)
+        self._place("Rdzenie", cf,
+                    f"Ten komputer: {n_p} CPU typu P i {n_e} typu E. Dotyczy tylko procesu transkrypcji "
+                    "(okno i nagrywanie działają normalnie). E zostawia rdzenie P dla innych programów, P = szybciej.")
+
+        # ── wynik ──
+        self.fmt = ctk.CTkSegmentedButton(body, values=engine.FORMATS)
+        self.fmt.set(o["format"])
+        self._place("Format", self.fmt, "txt – tekst · srt / vtt – napisy · all – wszystkie naraz")
+
+        self.ts = ctk.CTkSwitch(body, text="znaczniki czasu w pliku txt, np. [12.3s]")
+        if o["timestamps"]:
+            self.ts.select()
+        self._place("Timestampy", self.ts)
+
+        self.vad = ctk.CTkSwitch(body, text="filtr usuwania ciszy (VAD) – zalecany")
+        if o["vad"]:
+            self.vad.select()
+        self._place("VAD", self.vad)
+
+        self.limit = ctk.CTkEntry(body, width=150, placeholder_text="np. 45 lub 01:15:00")
+        if o["limit_time"]:
+            self.limit.insert(0, o["limit_time"])
+        self._place("Przytnij do", self.limit,
+                    "transkrybuj tylko do tego momentu każdego nagrania (minuty albo GG:MM:SS); pusto = całe. "
+                    "Przerwany plik pamięta swój limit.")
+
+        # ── monitor ──
+        self.watch_dir = ctk.StringVar(value=app.cfg["watch_dir"])
+        wf = ctk.CTkFrame(body, fg_color="transparent")
+        ctk.CTkEntry(wf, textvariable=self.watch_dir, width=330).pack(side="left")
+        ctk.CTkButton(wf, text="…", width=36, command=self._pick_watch).pack(side="left", padx=6)
+        self._place("Monitor folderu", wf,
+                    "folder obserwowany przełącznikiem „Monitoruj folder”; gotowe pliki trafiają do jego "
+                    "podfolderu „przetworzone”")
+
+        ctk.CTkLabel(body, text="Pierwsza transkrypcja pobiera model (large-v3-turbo: ok. 0,8–1,5 GB) i kompiluje go "
+                                "pod grafikę – to trwa kilka minut. Kolejne starty zajmują kilka sekund.",
+                     text_color=MUTED, wraplength=560, justify="left", font=ctk.CTkFont(size=11)
+                     ).grid(row=self.r, column=0, columnspan=2, sticky="w", padx=10, pady=(16, 4))
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.grid(row=1, column=0, sticky="ew", padx=18, pady=12)
+        ctk.CTkButton(btns, text="Domyślne", width=90, fg_color="transparent", border_width=1,
+                      border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
+                      command=self._defaults).pack(side="left")
+        self.err = ctk.CTkLabel(btns, text="", text_color=RED)
+        self.err.pack(side="left", padx=10)
+        ctk.CTkButton(btns, text="Zapisz", width=90, command=self._save).pack(side="right")
+        ctk.CTkButton(btns, text="Anuluj", width=90, fg_color="transparent", border_width=1,
+                      border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
+                      command=self.destroy).pack(side="right", padx=6)
+        self._sync()
+
+    def _place(self, text, widget, hint=None):
+        ctk.CTkLabel(self.body, text=text, anchor="w").grid(row=self.r, column=0, sticky="nw", padx=(10, 12), pady=(12, 0))
+        widget.grid(row=self.r, column=1, sticky="w", pady=(12, 0))
+        self.r += 1
+        if hint is None:
+            return None
+        h = ctk.CTkLabel(self.body, text=hint, anchor="w", justify="left", text_color=MUTED,
+                         wraplength=440, font=ctk.CTkFont(size=11))
+        h.grid(row=self.r, column=1, sticky="w")
+        self.r += 1
+        return h
+
+    def _dev(self):
+        return {v: k for k, v in self.DEVICES.items()}[self.device.get()]
+
+    def _sync(self):
+        dev = self._dev()
+        self.model_hint.configure(text=engine.MODEL_INFO.get(self.model.get(), ""))
+        for w in (self.compute, self.beam):
+            w.configure(state="disabled" if dev == "igpu" else "normal")
+        self.threads.configure(state="normal" if dev == "cpu" else "disabled")
+        self.cores_n.configure(state="normal" if self.cores.get() == self.CORES["n"] else "disabled")
+
+    def _pick_watch(self):
+        d = filedialog.askdirectory(parent=self, initialdir=self.watch_dir.get())
+        if d:
+            self.watch_dir.set(str(Path(d)))
+
+    def _defaults(self):
+        self.app.cfg["tr_opts"] = dict(engine.DEFAULT_OPTIONS)
+        save_config(self.app.cfg)
+        self.tab.update_summary()
+        self.destroy()
+        TranscribeOptions(self.app, self.tab)
+
+    def _save(self):
+        try:
+            beam, threads = int(self.beam.get()), int(self.threads.get())
+            if beam < 1 or threads < 1:
+                raise ValueError
+        except ValueError:
+            self.err.configure(text="Beam size i wątki: liczba całkowita ≥ 1")
+            return
+        cores = {v: k for k, v in self.CORES.items()}[self.cores.get()]
+        if cores == "n":
+            try:
+                cores = engine.parse_cores(self.cores_n.get())
+                int(cores)
+            except ValueError:
+                self.err.configure(text="Rdzenie: podaj liczbę N ≥ 1")
+                return
+        limit = self.limit.get().strip()
+        if limit and not engine.parse_time_to_seconds(limit):
+            self.err.configure(text="Przytnij do: np. 45 albo 01:15:00")
+            return
+        self.app.cfg["tr_opts"] = {
+            "model": self.model.get(), "language": self.lang.get().strip().lower() or "pl",
+            "device": self._dev(), "compute_type": self.compute.get(), "threads": threads, "cores": cores,
+            "format": self.fmt.get(), "beam_size": beam, "timestamps": bool(self.ts.get()),
+            "vad": bool(self.vad.get()), "limit_time": limit,
+        }
+        if self.watch_dir.get() != self.app.cfg["watch_dir"]:
+            self.app.cfg["watch_dir"] = self.watch_dir.get()
+            self.tab.ignored.clear()
+            self.tab._watch_label()
+        save_config(self.app.cfg)
+        self.tab.update_summary()
+        self.destroy()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -867,11 +1286,10 @@ class SettingsWindow(ctk.CTkToplevel):
             ctk.CTkButton(self, text="…", width=36, command=browse).grid(row=r, column=2, padx=(6, 18), pady=8)
 
         self.save_dir = ctk.StringVar(value=cfg["save_dir"])
-        self.fwdd = ctk.StringVar(value=cfg["fwdd_path"])
         row(0, "Folder nagrań", self.save_dir,
             lambda: self._pick_dir(self.save_dir))
-        row(1, "Skrypt fw-dd.py", self.fwdd,
-            lambda: self._pick_file(self.fwdd))
+        ctk.CTkLabel(self, text="Model, urządzenie, format itd.: zakładka Transkrypcja → ⚙ Opcje",
+                     text_color=MUTED, font=ctk.CTkFont(size=11)).grid(row=1, column=1, columnspan=2, sticky="w")
 
         ctk.CTkLabel(self, text="Jakość nagrania", anchor="w").grid(row=2, column=0, sticky="w", padx=(18, 8), pady=8)
         self.quality = ctk.CTkSegmentedButton(self, values=["24 kbps", "32 kbps", "48 kbps"])
@@ -902,16 +1320,9 @@ class SettingsWindow(ctk.CTkToplevel):
         if d:
             var.set(str(Path(d)))
 
-    def _pick_file(self, var):
-        f = filedialog.askopenfilename(parent=self, initialdir=str(Path(var.get()).parent),
-                                       filetypes=[("Python", "*.py")])
-        if f:
-            var.set(str(Path(f)))
-
     def _save(self):
         cfg = self.app.cfg
         cfg["save_dir"] = self.save_dir.get()
-        cfg["fwdd_path"] = self.fwdd.get()
         cfg["bitrate"] = int(self.quality.get().split()[0]) * 1000
         cfg["agc"] = bool(self.agc.get())
         cfg["appearance"] = {"Systemowy": "system", "Jasny": "light", "Ciemny": "dark"}[self.look.get()]
@@ -1016,14 +1427,7 @@ class App(ctk.CTk):
             return
         if self.rec_tab.is_recording():
             self.rec_tab.stop()
-        if self.tr_tab.job:
-            self.tr_tab.running = False
-            self.tr_tab.job.stop()
-            proc = self.tr_tab.job.proc
-            try:
-                proc.wait(timeout=60)
-            except Exception:
-                pass
+        self.tr_tab.shutdown()
         self.conv_tab.cancel.set()
         self.rec_tab.stop_monitor()
         self.destroy()

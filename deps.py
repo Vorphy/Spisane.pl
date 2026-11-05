@@ -160,3 +160,21 @@ def ensure():
             root.destroy()
         except Exception:
             pass
+
+
+def ensure_transcription(root, need_igpu):
+    """Przed transkrypcją: brakujące pakiety Whispera -> zapytaj i doinstaluj (także po wcześniejszej odmowie).
+    Zwraca False, gdy transkrypcja nie może ruszyć."""
+    from tkinter import messagebox
+    missing = [p for p in _missing() if p[3] == "transkrypcja" and (need_igpu or p[0] != "openvino_genai")]
+    if not missing:
+        return True
+    lines = "\n".join(f"  • {pip}  – {desc}" for _, pip, desc, _ in missing)
+    if not messagebox.askyesno("Notatnik spotkań – pakiety do transkrypcji",
+                               "Do transkrypcji brakuje pakietów:\n\n" + lines +
+                               "\n\nPobrać i zainstalować je teraz? (kilkaset MB)", parent=root):
+        return importlib.util.find_spec("faster_whisper") is not None
+    ok = _pip_install(root, [p[1] for p in missing])
+    if not ok:
+        messagebox.showerror("Notatnik spotkań", f"Instalacja nieudana. Szczegóły: {LOG_PATH}", parent=root)
+    return importlib.util.find_spec("faster_whisper") is not None

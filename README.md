@@ -13,8 +13,21 @@ do plików Opus, konwersji starych nagrań i kolejki transkrypcji.
 
 ## Transkrypcja
 
-Zakładka Transkrypcja uruchamia zewnętrzny skrypt `fw-dd.py` (nie ma go w repo).
-Skopiuj go obok aplikacji albo do folderu wyżej, lub wskaż ścieżkę w Ustawieniach.
+Wbudowana (Whisper large-v3-turbo), dawny skrypt `fw-dd.py` jest teraz częścią aplikacji:
+
+- **Grafika Intel Iris Xe** (OpenVINO, domyślnie), ok. 5–7× szybciej, niż trwa nagranie.
+  Fragmenty pominięte przez model wykrywa VAD i transkrybuje ponownie.
+  Bez grafiki Intel aplikacja sama przechodzi na procesor.
+- **Procesor** (faster-whisper): wątki, rdzenie P/E/wszystkie/N, beam size, typ obliczeń.
+- Formaty txt (z czasem albo bez), srt, vtt albo wszystkie naraz; filtr VAD; przycinanie do zadanego czasu.
+- **Zatrzymaj** zapisuje stan, a **Transkrybuj** wznawia od tego miejsca, także po ponownym uruchomieniu aplikacji.
+- **Monitor folderu**: nowe nagrania same trafiają do kolejki, gdy skończy się ich zapis
+  (np. z OBS albo z zakładki Nagrywanie).
+- Gotowe pliki i wyniki trafiają do podfolderu `przetworzone`.
+
+Wszystkie opcje są w zakładce Transkrypcja → **⚙ Opcje**. Transkrypcja działa w osobnym procesie
+o niskim priorytecie, więc okno i nagrywanie nie zwalniają, a pamięć po modelu zwalnia się po kolejce.
+Pierwsza transkrypcja pobiera model (ok. 1–3 GB).
 
 ## Prywatność
 
