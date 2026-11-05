@@ -162,11 +162,32 @@ def ensure():
             pass
 
 
-def ensure_transcription(root, need_igpu):
-    """Przed transkrypcją: brakujące pakiety Whispera -> zapytaj i doinstaluj (także po wcześniejszej odmowie).
-    Zwraca False, gdy transkrypcja nie może ruszyć."""
+def _cuda_missing():
+    """Biblioteki CUDA dla CTranslate2 – tylko gdy w komputerze jest karta NVIDIA."""
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() == 0:
+            return []
+    except Exception:
+        return []
+    out = []
+    for mod, pip, desc in (("nvidia.cublas", "nvidia-cublas-cu12", "CUDA cuBLAS dla karty NVIDIA"),
+                           ("nvidia.cudnn", "nvidia-cudnn-cu12==9.*", "CUDA cuDNN dla karty NVIDIA")):
+        try:
+            if importlib.util.find_spec(mod) is None:
+                out.append((mod, pip, desc, "transkrypcja"))
+        except ModuleNotFoundError:
+            out.append((mod, pip, desc, "transkrypcja"))
+    return out
+
+
+def ensure_transcription(root, device):
+    """Przed transkrypcją: brakujące pakiety Whispera (i CUDA dla NVIDIA) -> zapytaj i doinstaluj,
+    także po wcześniejszej odmowie. Zwraca False, gdy transkrypcja nie może ruszyć."""
     from tkinter import messagebox
-    missing = [p for p in _missing() if p[3] == "transkrypcja" and (need_igpu or p[0] != "openvino_genai")]
+    missing = [p for p in _missing() if p[3] == "transkrypcja" and (device == "igpu" or p[0] != "openvino_genai")]
+    if device == "cuda" and importlib.util.find_spec("faster_whisper") is not None:
+        missing += _cuda_missing()
     if not missing:
         return True
     lines = "\n".join(f"  • {pip}  – {desc}" for _, pip, desc, _ in missing)

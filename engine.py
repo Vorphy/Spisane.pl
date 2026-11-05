@@ -363,6 +363,40 @@ class IGPUWhisper:
         return portion[-1]["end"] / self.SR
 
 
+# ── NVIDIA (CUDA) ────────────────────────────────────────────────────────
+CUDA_PACKAGES = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12==9.*"]   # wymagane przez CTranslate2 4.x
+
+
+def cuda_devices():
+    """Liczba kart NVIDIA widocznych dla CTranslate2 (0 = brak karty albo sterownika)."""
+    try:
+        import ctranslate2
+        return ctranslate2.get_cuda_device_count()
+    except Exception:
+        return 0
+
+
+def add_cuda_dll_dirs():
+    """Biblioteki cuBLAS/cuDNN z pakietów pip (nvidia-*-cu12) leżą w site-packages/nvidia/*/bin –
+    Windows ich sam nie znajdzie, więc dopisujemy te foldery do ścieżki wyszukiwania DLL."""
+    if sys.platform != "win32":
+        return []
+    import site
+    found = []
+    for sp in site.getsitepackages() + [site.getusersitepackages()]:
+        root = Path(sp) / "nvidia"
+        if root.is_dir():
+            found += [d for d in root.glob("*/bin") if d.is_dir()]
+    for d in found:
+        try:
+            os.add_dll_directory(str(d))
+        except OSError:
+            pass
+    if found:
+        os.environ["PATH"] = os.pathsep.join(map(str, found)) + os.pathsep + os.environ.get("PATH", "")
+    return found
+
+
 # ── Ładowanie modelu ─────────────────────────────────────────────────────
 class LoadedModel:
     def __init__(self, model, device, opts):
@@ -385,12 +419,37 @@ def load_model(opts, log=print):
             log(f"[Ostrzeżenie] Grafika Iris Xe (OpenVINO) niedostępna: {ex}")
             log(f"Przełączam na CPU ({opts['threads']} wątków).")
             device = "cpu"
+    from faster_whisper import WhisperModel
+    if device == "cuda":
+        add_cuda_dll_dirs()
+        if not cuda_devices():
+            log("[Ostrzeżenie] Nie wykryto karty NVIDIA (albo sterownika) – przełączam na CPU.")
+            device = "cpu"
+        else:
+            try:
+                model = WhisperModel(opts["model"], device="cuda", compute_type=opts["compute_type"])
+                _cuda_selftest(model)
+                log(f"Urządzenie: cuda (NVIDIA, {opts['compute_type']})")
+            except Exception as ex:
+                model = None
+                log(f"[Ostrzeżenie] NVIDIA (CUDA) niedostępna: {ex}")
+                log("Przełączam na CPU. Brakujące biblioteki: pip install " + " ".join(CUDA_PACKAGES))
+                device = "cpu"
     if model is None:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(opts["model"], device=device, compute_type=opts["compute_type"],
+        if opts["device"] == "cuda":            # przejście z NVIDIA na procesor
+            log(f"Rdzenie: {apply_cores(opts['cores'])}")
+        compute = opts["compute_type"] if opts["device"] != "cuda" else "int8"
+        model = WhisperModel(opts["model"], device="cpu", compute_type=compute,
                              cpu_threads=int(opts["threads"]))
-        log(f"Urządzenie: {device} ({opts['compute_type']}, {opts['threads']} wątków)")
+        log(f"Urządzenie: cpu ({compute}, {opts['threads']} wątków)")
     return LoadedModel(model, device, opts)
+
+
+def _cuda_selftest(model):
+    """Brak cuDNN/cuBLAS wychodzi dopiero przy pierwszej transkrypcji – sprawdzamy od razu na 1 s ciszy."""
+    import numpy as np
+    segs, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language="pl", beam_size=1, vad_filter=False)
+    list(segs)
 
 
 # ── Zapis wyników ────────────────────────────────────────────────────────

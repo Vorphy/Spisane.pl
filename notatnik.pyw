@@ -333,8 +333,6 @@ class TranscribeTab(FileQueue):
             parts.append(f"beam {o['beam_size']}")
         if not o["vad"]:
             parts.append("bez VAD")
-        if o["limit_time"]:
-            parts.append(f"✂ do {o['limit_time']}")
         self.summary.configure(text="Opcje:  " + "  ·  ".join(parts) + "   (kliknij, żeby zmienić)")
 
     def _watch_label(self):
@@ -379,9 +377,33 @@ class TranscribeTab(FileQueue):
         return transcriber.scan_folder(folder, exclude=[rec] if rec else [])
 
     def on_added(self, row):
-        if (row.path.with_suffix(".transcribe_state").exists()
-                or leveled_tmp(row.path).with_suffix(".transcribe_state").exists()):
+        if not hasattr(row, "limit"):
+            row.limit = ctk.CTkEntry(row, width=110, height=24, font=ctk.CTkFont(size=11),
+                                     placeholder_text="✂ przytnij do…")
+            row.limit.grid(row=1, column=1, sticky="e", padx=4)
+            row.limit.bind("<FocusOut>", lambda e, r=row: self._check_limit(r))
+            row.limit.bind("<Return>", lambda e, r=row: self._check_limit(r))
+        state = None
+        for st in (row.path.with_suffix(".transcribe_state"), leveled_tmp(row.path).with_suffix(".transcribe_state")):
+            if st.exists():
+                state = st
+        if state:
             row.set_status("do wznowienia")
+            try:                                   # przerwany plik pamięta swój limit
+                lim = json.loads(state.read_text(encoding="utf-8")).get("limit_time") or ""
+            except (OSError, ValueError):
+                lim = ""
+            row.limit.delete(0, "end")
+            if lim:
+                row.limit.insert(0, lim)
+            row.limit.configure(state="disabled")
+
+    def _check_limit(self, row):
+        """Zwraca limit z pola wiersza ('' = całe nagranie) albo None, gdy format jest zły."""
+        v = row.limit.get().strip()
+        ok = not v or engine.parse_time_to_seconds(v)
+        row.limit.configure(border_color=CARD_BORDER if ok else RED)
+        return v if ok else None
 
     def remove_row(self, row):
         if row.status != "w toku" and self.watching:
@@ -391,6 +413,9 @@ class TranscribeTab(FileQueue):
     def next_waiting(self, peek=False):
         """Pierwszy plik gotowy do transkrypcji. Pliki z monitora czekają, aż skończy się ich zapis."""
         for r in self.rows:
+            if (r.status == "błąd" and r.detail.cget("text").startswith("Przytnij do")
+                    and self._check_limit(r) is not None):
+                r.set_status("czeka", str(r.path.parent))
             if r.status not in ("czeka", "do wznowienia"):
                 continue
             w = getattr(r, "watcher", None)
@@ -451,7 +476,7 @@ class TranscribeTab(FileQueue):
             self._start_running()
 
     def _start_running(self):
-        if not deps.ensure_transcription(self.app, self.opts["device"] == "igpu"):
+        if not deps.ensure_transcription(self.app, self.opts["device"]):
             messagebox.showerror(APP_NAME, "Bez pakietu faster-whisper transkrypcja nie zadziała.", parent=self)
             if self.watching:
                 self.watch_sw.deselect()
@@ -470,6 +495,7 @@ class TranscribeTab(FileQueue):
         row.set_progress(0)
         row.action.configure(state="normal")
         row.set_status("czeka")
+        row.limit.configure(state="normal")
         self.on_added(row)
 
     def tick(self):
@@ -495,6 +521,13 @@ class TranscribeTab(FileQueue):
         if row.path == self.app.rec_tab.current_path():
             self.live.configure(text="⏸  Ten plik jest właśnie nagrywany – czekam…")
             return
+        limit = self._check_limit(row)
+        if limit is None:
+            row.set_status("błąd", "Przytnij do: wpisz minuty (np. 45) albo GG:MM:SS (np. 01:15:00)")
+            self.after(10, self.tick)
+            return
+        row.limit_value = limit
+        row.limit.configure(state="disabled")
         row.set_status("w toku")
         row.action.configure(state="disabled")
         level = self.app.cfg["level_transcribe"]
@@ -571,7 +604,7 @@ class TranscribeTab(FileQueue):
     def _send_job(self, row, audio):
         self.current = (row, audio)
         self.live.configure(text="Transkrybuję…")
-        self.worker.job(audio, dict(self.opts))
+        self.worker.job(audio, dict(self.opts, limit_time=getattr(row, "limit_value", "")))
 
     def _release_worker(self):
         if self.worker:
@@ -621,6 +654,7 @@ class TranscribeTab(FileQueue):
                 self._fail(target[0], msg, log_tail)
 
     def _fail(self, row, msg, log_tail):
+        row.limit.configure(state="normal")
         row.set_status("błąd", f"{msg[:90]}   ·   szczegóły w notatnik.log")
         row.set_progress(0)
         row.action.configure(state="normal")
@@ -755,15 +789,20 @@ class TranscribeOptions(ctk.CTkToplevel):
         self._place("Urządzenie", self.device,
                     "Grafika Intel Iris Xe: ok. 5–7× szybciej, niż trwa nagranie (beam 1); fragmenty pominięte "
                     "przez model wykrywa VAD i transkrybuje ponownie. Bez grafiki Intel samo przejdzie na procesor.\n"
-                    "Procesor: ok. 3× wolniej, obsługuje beam 2+ – dla ważnych nagrań: Procesor + beam 2.")
+                    "Procesor: ok. 3× wolniej, obsługuje beam 2+ – dla ważnych nagrań: Procesor + beam 2.\n"
+                    "NVIDIA (CUDA): dla komputerów z kartą GeForce/RTX – zwykle najszybsza opcja; brakujące "
+                    "biblioteki CUDA aplikacja zaproponuje doinstalować. Bez karty NVIDIA samo przejdzie na procesor.")
 
+        # wartości dla procesora/NVIDIA – przy grafice Intel pola pokazują stałe int8 / 1
+        self._cpu_vals = {"compute": o["compute_type"], "beam": str(o["beam_size"])}
+        self._igpu_shown = False
         self.compute = ctk.CTkOptionMenu(body, width=160, values=engine.COMPUTE_TYPES)
         self.compute.set(o["compute_type"])
-        self._place("Typ obliczeń", self.compute, "int8 – najszybszy pod CPU (na grafice Intel zawsze int8)")
+        self.compute_hint = self._place("Typ obliczeń", self.compute, " ")
 
         self.beam = ctk.CTkEntry(body, width=70)
         self.beam.insert(0, str(o["beam_size"]))
-        self._place("Beam size", self.beam, "wyższy = dokładniejszy, ale wolniejszy (grafika Intel zawsze 1)")
+        self.beam_hint = self._place("Beam size", self.beam, " ")
 
         self.threads = ctk.CTkEntry(body, width=70)
         self.threads.insert(0, str(o["threads"]))
@@ -797,13 +836,6 @@ class TranscribeOptions(ctk.CTkToplevel):
         if o["vad"]:
             self.vad.select()
         self._place("VAD", self.vad)
-
-        self.limit = ctk.CTkEntry(body, width=150, placeholder_text="np. 45 lub 01:15:00")
-        if o["limit_time"]:
-            self.limit.insert(0, o["limit_time"])
-        self._place("Przytnij do", self.limit,
-                    "transkrybuj tylko do tego momentu każdego nagrania (minuty albo GG:MM:SS); pusto = całe. "
-                    "Przerwany plik pamięta swój limit.")
 
         # ── monitor ──
         self.watch_dir = ctk.StringVar(value=app.cfg["watch_dir"])
@@ -847,11 +879,37 @@ class TranscribeOptions(ctk.CTkToplevel):
     def _dev(self):
         return {v: k for k, v in self.DEVICES.items()}[self.device.get()]
 
+    def _set_entry(self, entry, value):
+        entry.configure(state="normal")
+        entry.delete(0, "end")
+        entry.insert(0, value)
+
     def _sync(self):
         dev = self._dev()
         self.model_hint.configure(text=engine.MODEL_INFO.get(self.model.get(), ""))
+        igpu = dev == "igpu"
+        if igpu and not self._igpu_shown:          # zapamiętaj ustawienia procesora, pokaż stałe wartości
+            self._cpu_vals = {"compute": self.compute.get(), "beam": self.beam.get()}
+            self.compute.set("int8")
+            self._set_entry(self.beam, "1")
+        elif not igpu and self._igpu_shown:         # wróć do ustawień procesora
+            self.compute.set(self._cpu_vals["compute"])
+            self._set_entry(self.beam, self._cpu_vals["beam"])
+        self._igpu_shown = igpu
         for w in (self.compute, self.beam):
-            w.configure(state="disabled" if dev == "igpu" else "normal")
+            w.configure(state="disabled" if igpu else "normal")
+        if igpu:
+            self.compute_hint.configure(text="Grafika Intel: model jest zawsze int8 (tak go przygotowano pod OpenVINO).")
+            self.beam_hint.configure(text="Grafika Intel obsługuje tylko beam 1 – OpenVINO nie ma beam search na GPU. "
+                                          "Fragmenty pominięte przez model nadrabia weryfikacja VAD. "
+                                          "Wyższy beam (np. 2 dla ważnych nagrań): wybierz Procesor.")
+        else:
+            self.compute_hint.configure(text="int8 – najszybszy pod CPU; float16 – zalecany dla NVIDIA")
+            self.beam_hint.configure(text="wyższy = dokładniejszy, ale wolniejszy (domyślnie 2)")
+        if dev == "cuda" and not engine.cuda_devices():
+            self.err.configure(text="Na tym komputerze nie ma karty NVIDIA – transkrypcja pójdzie na procesor")
+        else:
+            self.err.configure(text="")
         self.threads.configure(state="normal" if dev == "cpu" else "disabled")
         self.cores_n.configure(state="normal" if self.cores.get() == self.CORES["n"] else "disabled")
 
@@ -868,8 +926,11 @@ class TranscribeOptions(ctk.CTkToplevel):
         TranscribeOptions(self.app, self.tab)
 
     def _save(self):
+        igpu = self._dev() == "igpu"
+        beam_txt = self._cpu_vals["beam"] if igpu else self.beam.get()
+        compute = self._cpu_vals["compute"] if igpu else self.compute.get()
         try:
-            beam, threads = int(self.beam.get()), int(self.threads.get())
+            beam, threads = int(beam_txt), int(self.threads.get())
             if beam < 1 or threads < 1:
                 raise ValueError
         except ValueError:
@@ -883,15 +944,11 @@ class TranscribeOptions(ctk.CTkToplevel):
             except ValueError:
                 self.err.configure(text="Rdzenie: podaj liczbę N ≥ 1")
                 return
-        limit = self.limit.get().strip()
-        if limit and not engine.parse_time_to_seconds(limit):
-            self.err.configure(text="Przytnij do: np. 45 albo 01:15:00")
-            return
         self.app.cfg["tr_opts"] = {
             "model": self.model.get(), "language": self.lang.get().strip().lower() or "pl",
-            "device": self._dev(), "compute_type": self.compute.get(), "threads": threads, "cores": cores,
+            "device": self._dev(), "compute_type": compute, "threads": threads, "cores": cores,
             "format": self.fmt.get(), "beam_size": beam, "timestamps": bool(self.ts.get()),
-            "vad": bool(self.vad.get()), "limit_time": limit,
+            "vad": bool(self.vad.get()), "limit_time": "",
         }
         if self.watch_dir.get() != self.app.cfg["watch_dir"]:
             self.app.cfg["watch_dir"] = self.watch_dir.get()
