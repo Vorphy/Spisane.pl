@@ -1,0 +1,21 @@
+# ustawienia i logi tego komputera
+config.json
+notatnik.log
+# kopie robocze i pliki tymczasowe
+_wyrownane/
+__pycache__/
+*.backup*
+# nagrania i transkrypcje – NIGDY do repo (poufne spotkania)
+*.opus
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.mkv
+*.webm
+*.flac
+*.ogg
+*.txt
+!requirements.txt
+*.transcribe_state
+przetworzone/
