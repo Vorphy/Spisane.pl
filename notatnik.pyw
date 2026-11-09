@@ -47,7 +47,9 @@ DEFAULTS = {
     "bitrate": 32000,
     "agc": True,
     "pause_while_recording": True,
-    "delete_original": False,
+    "convert_bitrate": None,     # None = jak nagrywanie (migracja ze wspólnego "bitrate")
+    "original_action": None,     # keep / trash / delete (migracja z dawnego "delete_original")
+    "convert_out_dir": "",       # "" = obok oryginału
     "level_convert": True,
     "level_transcribe": True,
     "denoise_convert": True,
@@ -94,9 +96,46 @@ def load_config():
     except (OSError, ValueError):
         pass
     cfg.pop("fwdd_path", None)   # dawny zewnętrzny skrypt – transkrypcja jest teraz wbudowana
+    if cfg.get("convert_bitrate") is None:          # do 2026-11-09 konwersja brała jakość nagrywania
+        cfg["convert_bitrate"] = cfg["bitrate"]
+    if cfg.get("original_action") not in ("keep", "trash", "delete"):
+        cfg["original_action"] = "delete" if cfg.get("delete_original") else "keep"
+    cfg.pop("delete_original", None)
+    if cfg.get("convert_cores") not in CONVERT_CORES:
+        cfg["convert_cores"] = "auto"
     cfg["tr_opts"] = {**engine.DEFAULT_OPTIONS, **{k: v for k, v in (cfg.get("tr_opts") or {}).items()
                                                    if k in engine.DEFAULT_OPTIONS}}
     return cfg
+
+
+def to_recycle_bin(path):
+    """Przenosi plik do Kosza (z możliwością przywrócenia). Rzuca OSError przy niepowodzeniu."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT),
+                    ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR),
+                    ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+    FO_DELETE, FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO, FOF_NOERRORUI = 3, 0x4, 0x10, 0x40, 0x400
+    op = SHFILEOPSTRUCTW(wFunc=FO_DELETE, pFrom=str(Path(path).resolve()) + "\0",
+                         fFlags=FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI)
+    rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    if rc or op.fAnyOperationsAborted or Path(path).exists():
+        raise OSError(f"Nie udało się przenieść do Kosza (kod {rc})")
+
+
+def opus_target(src, out_dir=""):
+    """Ścieżka wyniku konwersji: obok oryginału albo w out_dir; nie nadpisuje istniejących plików."""
+    src = Path(src)
+    folder = Path(out_dir) if out_dir else src.parent
+    dst = folder / (src.stem + ".opus")
+    n = 2
+    while dst.exists() or dst.resolve() == src.resolve():
+        dst = folder / f"{src.stem} ({n}).opus"
+        n += 1
+    return dst
 
 
 def save_config(cfg):
@@ -974,83 +1013,303 @@ class TranscribeOptions(ctk.CTkToplevel):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  Okno opcji – wspólna podstawa (Nagrywanie, Konwersja)
+# ══════════════════════════════════════════════════════════════════════════
+QUALITIES = {24000: "24 kbps", 32000: "32 kbps", 48000: "48 kbps"}
+ORIGINAL_ACTIONS = {"keep": "Zostaw", "trash": "Do Kosza", "delete": "Usuń na stałe"}
+
+
+def quality_label(bitrate):
+    return QUALITIES.get(bitrate, "32 kbps")
+
+
+def quality_value(label):
+    return {v: k for k, v in QUALITIES.items()}[label]
+
+
+class OptionsDialog(ctk.CTkToplevel):
+    """Okno opcji zakładki: przewijana lista „etykieta – kontrolka – podpowiedź” i przyciski na dole."""
+
+    def __init__(self, app, title, size="620x520"):
+        super().__init__(app)
+        self.app = app
+        self.title(title)
+        self.geometry(size)
+        self.minsize(520, 360)
+        self.transient(app)
+        self.after(50, self.grab_set)
+        if ICON_PATH.exists():
+            self.after(250, lambda: self.iconbitmap(str(ICON_PATH)))
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.body.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 0))
+        self.body.grid_columnconfigure(1, weight=1)
+        self.r = 0
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.grid(row=1, column=0, sticky="ew", padx=18, pady=12)
+        ctk.CTkButton(btns, text="Domyślne", width=90, fg_color="transparent", border_width=1,
+                      border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
+                      command=self._defaults).pack(side="left")
+        self.err = ctk.CTkLabel(btns, text="", text_color=RED)
+        self.err.pack(side="left", padx=10)
+        ctk.CTkButton(btns, text="Zapisz", width=90, command=self._save).pack(side="right")
+        ctk.CTkButton(btns, text="Anuluj", width=90, fg_color="transparent", border_width=1,
+                      border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
+                      command=self.destroy).pack(side="right", padx=6)
+
+    def _place(self, text, widget, hint=None):
+        ctk.CTkLabel(self.body, text=text, anchor="w").grid(row=self.r, column=0, sticky="nw",
+                                                             padx=(10, 12), pady=(12, 0))
+        widget.grid(row=self.r, column=1, sticky="w", pady=(12, 0))
+        self.r += 1
+        if hint is None:
+            return None
+        h = ctk.CTkLabel(self.body, text=hint, anchor="w", justify="left", text_color=MUTED,
+                         wraplength=400, font=ctk.CTkFont(size=11))
+        h.grid(row=self.r, column=1, sticky="w")
+        self.r += 1
+        return h
+
+    def _folder_field(self, var, width=320):
+        f = ctk.CTkFrame(self.body, fg_color="transparent")
+        f.entry = ctk.CTkEntry(f, textvariable=var, width=width)
+        f.entry.pack(side="left")
+        f.button = ctk.CTkButton(f, text="…", width=36, command=lambda: self._pick_dir(var))
+        f.button.pack(side="left", padx=6)
+        return f
+
+    def _pick_dir(self, var):
+        d = filedialog.askdirectory(parent=self, initialdir=var.get() or self.app.cfg["save_dir"])
+        if d:
+            var.set(str(Path(d)))
+
+    def _defaults(self):
+        for k in self.KEYS:
+            self.app.cfg[k] = DEFAULTS[k]
+        self._after_defaults()
+        save_config(self.app.cfg)
+        self._changed()
+        self.destroy()
+        type(self)(self.app)
+
+    def _after_defaults(self):
+        pass
+
+    def _changed(self):
+        pass
+
+
+class RecordOptions(OptionsDialog):
+    KEYS = ("save_dir", "bitrate", "agc")
+
+    def __init__(self, app):
+        super().__init__(app, "Opcje nagrywania", "620x420")
+        cfg = app.cfg
+        self.save_dir = ctk.StringVar(value=cfg["save_dir"])
+        self._place("Folder nagrań", self._folder_field(self.save_dir),
+                    "tu trafiają nowe nagrania (nazwa pliku = data i godzina)")
+
+        self.quality = ctk.CTkSegmentedButton(self.body, values=list(QUALITIES.values()))
+        self.quality.set(quality_label(cfg["bitrate"]))
+        self._place("Jakość nagrania", self.quality,
+                    "24 kbps ≈ 11 MB na godzinę · 32 kbps ≈ 14 MB · 48 kbps ≈ 22 MB.\n"
+                    "32 kbps w zupełności wystarcza do mowy.")
+
+        self.agc = ctk.CTkSwitch(self.body, text="cisi rozmówcy podgłośnieni do poziomu mowy")
+        if cfg["agc"]:
+            self.agc.select()
+        self._place("Wyrównywanie głośności", self.agc,
+                    "na bieżąco, osobno dla mikrofonu i dla rozmówców")
+
+        ctk.CTkLabel(self.body, text="Zmiany obowiązują od następnego nagrania. Mikrofon i głośniki "
+                                     "wybierasz bezpośrednio w zakładce Nagrywanie.",
+                     text_color=MUTED, wraplength=520, justify="left", font=ctk.CTkFont(size=11)
+                     ).grid(row=self.r, column=0, columnspan=2, sticky="w", padx=10, pady=(18, 4))
+
+    def _after_defaults(self):
+        self.app.cfg["save_dir"] = str(Path.home() / "Videos")
+
+    def _changed(self):
+        self.app.rec_tab.update_summary()
+
+    def _save(self):
+        d = self.save_dir.get().strip()
+        if not d:
+            self.err.configure(text="Wybierz folder nagrań")
+            return
+        cfg = self.app.cfg
+        cfg["save_dir"] = str(Path(d))
+        cfg["bitrate"] = quality_value(self.quality.get())
+        cfg["agc"] = bool(self.agc.get())
+        save_config(cfg)
+        self._changed()
+        self.destroy()
+
+
+class ConvertOptions(OptionsDialog):
+    KEYS = ("convert_bitrate", "level_convert", "denoise_convert", "convert_cores",
+            "original_action", "convert_out_dir")
+    OUT = {"beside": "Obok oryginału", "folder": "Wybrany folder"}
+    CORE_HINTS = {
+        "auto": "E podczas nagrywania, P poza nim – przełącza się w trakcie pliku.",
+        "p": "Najszybciej (ok. 2× szybciej niż E), ale konkuruje z aplikacjami na pierwszym planie.",
+        "e": "Wolniej, za to rdzenie P zostają wolne dla Teams i innych aplikacji.",
+        "all": "Windows sam przydziela – konwersja i tak używa jednego wątku.",
+    }
+    ORIGINAL_HINTS = {
+        "keep": "Oryginał zostaje na miejscu.",
+        "trash": "Oryginał trafia do Kosza – w razie pomyłki można go przywrócić.",
+        "delete": "Oryginał jest usuwany bez Kosza – nie da się go przywrócić.",
+    }
+
+    def __init__(self, app):
+        super().__init__(app, "Opcje konwersji", "640x640")
+        cfg = app.cfg
+
+        self.quality = ctk.CTkSegmentedButton(self.body, values=list(QUALITIES.values()))
+        self.quality.set(quality_label(cfg["convert_bitrate"]))
+        self._place("Jakość pliku", self.quality,
+                    "24 kbps ≈ 11 MB na godzinę · 32 kbps ≈ 14 MB · 48 kbps ≈ 22 MB.\n"
+                    "Niezależna od jakości nagrywania – np. stare MP4 można mocniej skompresować.")
+
+        self.level = ctk.CTkSwitch(self.body, text="cisi rozmówcy podgłośnieni")
+        if cfg["level_convert"]:
+            self.level.select()
+        self._place("Wyrównanie głośności", self.level)
+        self.denoise = ctk.CTkSwitch(self.body, text="filtr buczenia i bramka szumu tła")
+        if cfg["denoise_convert"]:
+            self.denoise.select()
+        self._place("Usuwanie szumu", self.denoise,
+                    "Obie opcje wydłużają konwersję (ok. 2–3×), ale wciąż trwa ona minuty, nie godziny.")
+
+        self.cores = ctk.CTkSegmentedButton(self.body, values=list(CONVERT_CORES.values()),
+                                            command=lambda _: self._sync())
+        self.cores.set(CONVERT_CORES[cfg["convert_cores"]])
+        self.cores_hint = self._place("Rdzenie CPU", self.cores, " ")
+
+        self.original = ctk.CTkSegmentedButton(self.body, values=list(ORIGINAL_ACTIONS.values()),
+                                               command=lambda _: self._sync())
+        self.original.set(ORIGINAL_ACTIONS[cfg["original_action"]])
+        self.original_hint = self._place("Oryginał po konwersji", self.original, " ")
+
+        self.out_mode = ctk.CTkSegmentedButton(self.body, values=list(self.OUT.values()),
+                                               command=lambda _: self._sync())
+        self.out_mode.set(self.OUT["folder" if cfg["convert_out_dir"] else "beside"])
+        self._place("Zapis wyniku", self.out_mode)
+        self.out_dir = ctk.StringVar(value=cfg["convert_out_dir"])
+        self.out_field = self._folder_field(self.out_dir)
+        self._place("", self.out_field,
+                    "Plik .opus nie nadpisuje istniejących – przy powtórzonej nazwie dostaje dopisek (2), (3)…")
+
+        ctk.CTkLabel(self.body, text="Rdzenie CPU, wyrównanie i usuwanie szumu dotyczą też przygotowania "
+                                     "dźwięku przed transkrypcją (tam włączasz je przełącznikami w zakładce).",
+                     text_color=MUTED, wraplength=540, justify="left", font=ctk.CTkFont(size=11)
+                     ).grid(row=self.r, column=0, columnspan=2, sticky="w", padx=10, pady=(18, 4))
+        self._sync()
+
+    def _key(self, mapping, label):
+        return {v: k for k, v in mapping.items()}[label]
+
+    def _sync(self):
+        cores = self._key(CONVERT_CORES, self.cores.get())
+        original = self._key(ORIGINAL_ACTIONS, self.original.get())
+        self.cores_hint.configure(text=self.CORE_HINTS[cores])
+        extra = ("" if original == "keep" else
+                 "\nPrzed usunięciem sprawdzam, czy długość nagrania się zgadza. Z pliku wideo zostaje tylko dźwięk.")
+        self.original_hint.configure(text=self.ORIGINAL_HINTS[original] + extra,
+                                     text_color=RED if original == "delete" else MUTED)
+        state = "normal" if self.out_mode.get() == self.OUT["folder"] else "disabled"
+        self.out_field.entry.configure(state=state)
+        self.out_field.button.configure(state=state)
+
+    def _after_defaults(self):
+        self.app.cfg["convert_bitrate"] = 32000
+        self.app.cfg["original_action"] = "keep"
+
+    def _changed(self):
+        self.app.conv_tab.update_summary()
+
+    def _save(self):
+        out = ""
+        if self.out_mode.get() == self.OUT["folder"]:
+            out = self.out_dir.get().strip()
+            if not out:
+                self.err.configure(text="Wybierz folder na wyniki")
+                return
+            out = str(Path(out))
+        cfg = self.app.cfg
+        cfg["convert_bitrate"] = quality_value(self.quality.get())
+        cfg["level_convert"] = bool(self.level.get())
+        cfg["denoise_convert"] = bool(self.denoise.get())
+        cfg["convert_cores"] = self._key(CONVERT_CORES, self.cores.get())
+        cfg["original_action"] = self._key(ORIGINAL_ACTIONS, self.original.get())
+        cfg["convert_out_dir"] = out
+        save_config(cfg)
+        self._changed()
+        self.destroy()
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  Zakładka: Konwersja
 # ══════════════════════════════════════════════════════════════════════════
 class ConvertTab(FileQueue):
     def __init__(self, master, app):
         super().__init__(master, app, "Dodaj nagrania MP4 (np. z OBS) albo cały folder.\n"
-                                      "Powstanie plik .opus obok – wielokrotnie mniejszy.")
+                                      "Powstanie plik .opus – wielokrotnie mniejszy.")
         self.running = False
         self.worker = None
         self.cancel = threading.Event()
-        self.saved_total = 0      # faktycznie odzyskane (usunięte oryginały)
+        self.saved_total = 0      # faktycznie odzyskane (oryginały usunięte na stałe)
+        self.trashed = 0          # oryginały w Koszu – miejsce wróci po opróżnieniu Kosza
         self.potential = 0        # do odzyskania po ręcznym usunięciu oryginałów
+
+        ctk.CTkButton(self.toolbar, text="⚙ Opcje", width=86, fg_color="transparent", border_width=1,
+                      border_color=CARD_BORDER, text_color=("gray20", "gray80"), hover_color=CARD,
+                      command=lambda: ConvertOptions(self.app)).pack(side="right")
+        self.summary = ctk.CTkLabel(self, text="", anchor="w", text_color=MUTED, font=ctk.CTkFont(size=11),
+                                    cursor="hand2", wraplength=540, justify="left")
+        self.summary.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        self.summary.bind("<Button-1>", lambda e: ConvertOptions(self.app))
+        self.update_summary()
 
         foot = ctk.CTkFrame(self, fg_color="transparent")
         foot.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         foot.grid_columnconfigure(0, weight=1)
-        self.info = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED)
-        self.info.grid(row=0, column=0, columnspan=2, sticky="ew")
-        self.del_cb = ctk.CTkCheckBox(foot, text="Usuń oryginał po udanej konwersji",
-                                      command=self._del_changed)
-        if app.cfg["delete_original"]:
-            self.del_cb.select()
-        self.del_cb.grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.level_cb = ctk.CTkCheckBox(foot, text="Wyrównaj głośność (cisi rozmówcy podgłośnieni)",
-                                        command=self._level_changed)
-        if app.cfg["level_convert"]:
-            self.level_cb.select()
-        self.level_cb.grid(row=2, column=0, sticky="w", pady=(6, 0))
-        self.nr_cb = ctk.CTkCheckBox(foot, text="Usuń szum tła", command=self._level_changed)
-        if app.cfg["denoise_convert"]:
-            self.nr_cb.select()
-        self.nr_cb.grid(row=3, column=0, sticky="w", pady=(6, 0))
-        cf = ctk.CTkFrame(foot, fg_color="transparent")
-        cf.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ctk.CTkLabel(cf, text="Rdzenie CPU:").pack(side="left", padx=(0, 8))
-        self.cores_sb = ctk.CTkSegmentedButton(cf, values=list(CONVERT_CORES.values()),
-                                               command=self._cores_changed)
-        self.cores_sb.set(CONVERT_CORES.get(app.cfg["convert_cores"], CONVERT_CORES["auto"]))
-        self.cores_sb.pack(side="left")
-        self.cores_hint = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED, justify="left")
-        self.cores_hint.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(2, 0))
-        self._cores_hint()
+        self.live = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED,
+                                 font=ctk.CTkFont(size=12, slant="italic"))
+        self.live.grid(row=0, column=0, sticky="ew")
+        self.info = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED, wraplength=360, justify="left")
+        self.info.grid(row=1, column=0, sticky="ew")
         self.btn = ctk.CTkButton(foot, text="▶  Konwertuj", width=150, height=36,
                                  font=ctk.CTkFont(size=14, weight="bold"), command=self.toggle)
-        self.btn.grid(row=1, column=1, rowspan=3, sticky="e", pady=(6, 0))
+        self.btn.grid(row=0, column=1, rowspan=2, sticky="e", pady=(6, 0))
 
-    def _cores_changed(self, label):
-        self.app.cfg["convert_cores"] = {v: k for k, v in CONVERT_CORES.items()}[label]
-        save_config(self.app.cfg)
-        self._cores_hint()
-
-    def _cores_hint(self, now=None):
-        hint = {"auto": "E podczas nagrywania, P poza nim – przełącza się w trakcie pliku.",
-                "p": "Najszybciej (ok. 2× szybciej niż E), ale konkuruje z aplikacjami na pierwszym planie.",
-                "e": "Wolniej, za to rdzenie P zostają wolne dla Teams i innych aplikacji.",
-                "all": "Windows sam przydziela – konwersja i tak używa jednego wątku."
-                }.get(self.app.cfg["convert_cores"], "")
-        hint += "  Dotyczy też przygotowania dźwięku do transkrypcji."
-        if now:
-            hint = f"Teraz: rdzenie {now}.   " + hint
-        self.cores_hint.configure(text=hint)
-
-    def _level_changed(self):
-        self.app.cfg["level_convert"] = bool(self.level_cb.get())
-        self.app.cfg["denoise_convert"] = bool(self.nr_cb.get())
-        save_config(self.app.cfg)
-
-    def _del_changed(self):
-        self.app.cfg["delete_original"] = bool(self.del_cb.get())
-        save_config(self.app.cfg)
+    def update_summary(self):
+        c = self.app.cfg
+        parts = [quality_label(c["convert_bitrate"])]
+        fx = [x for x, on in (("wyrównanie", c["level_convert"]), ("bez szumu", c["denoise_convert"])) if on]
+        parts.append(" + ".join(fx) if fx else "bez obróbki")
+        parts.append("rdzenie " + {"auto": "automatycznie"}.get(c["convert_cores"],
+                                                               CORE_NAMES.get(c["convert_cores"], "")))
+        parts.append({"keep": "oryginał zostaje", "trash": "oryginał do Kosza",
+                      "delete": "oryginał usuwany na stałe"}[c["original_action"]])
+        out = c["convert_out_dir"]
+        parts.append(f"zapis do „{Path(out).name or out}”" if out else "zapis obok oryginału")
+        self.summary.configure(text="Opcje:  " + "  ·  ".join(parts) + "   (kliknij, żeby zmienić)")
 
     def filetypes(self):
         return [("Nagrania wideo/audio", " ".join("*" + e for e in sorted(CONVERT_EXT))),
                 ("Wszystkie pliki", "*.*")]
 
+    def _converted(self, f):
+        out = self.app.cfg["convert_out_dir"]
+        return f.with_suffix(".opus").exists() or bool(out and (Path(out) / (f.stem + ".opus")).exists())
+
     def scan(self, folder):
         return [f for f in sorted(Path(folder).iterdir())
-                if f.is_file() and f.suffix.lower() in CONVERT_EXT and not f.with_suffix(".opus").exists()]
+                if f.is_file() and f.suffix.lower() in CONVERT_EXT and not self._converted(f)]
 
     def on_added(self, row):
         try:
@@ -1066,22 +1325,34 @@ class ConvertTab(FileQueue):
         if not self.next_waiting():
             messagebox.showinfo(APP_NAME, "Brak plików do konwersji.", parent=self)
             return
-        if self.app.cfg["delete_original"] and not messagebox.askyesno(
-                APP_NAME, "Oryginały zostaną usunięte po udanej konwersji (sprawdzam długość nagrania).\n"
-                          "Obraz z plików wideo przepadnie. Kontynuować?", parent=self):
+        out = self.app.cfg["convert_out_dir"]
+        if out:
+            try:
+                Path(out).mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                messagebox.showerror(APP_NAME, f"Nie mogę użyć folderu na wyniki:\n{out}\n\n{e}", parent=self)
+                return
+        if self.app.cfg["original_action"] == "delete" and not messagebox.askyesno(
+                APP_NAME, "Oryginały zostaną usunięte NA STAŁE (bez Kosza) po udanej konwersji – "
+                          "sprawdzam długość nagrania.\nObraz z plików wideo przepadnie. Kontynuować?",
+                parent=self):
             return
         self.running = True
         self.cancel.clear()
         self.btn.configure(text="■  Zatrzymaj", fg_color=RED, hover_color=RED_HOVER)
+        self.live.configure(text="Konwertuję…")
         self.worker = threading.Thread(target=self._work, daemon=True)
         self.worker.start()
 
     def _work(self):
         ui = self.app.ui
-        delete = self.app.cfg["delete_original"]
-        bitrate = self.app.cfg["bitrate"]
-        level = self.app.cfg["level_convert"]
-        denoise = self.app.cfg["denoise_convert"]
+        c = dict(self.app.cfg)          # ustawienia z chwili startu
+        action = c["original_action"]
+
+        def on_cores(kind, desc):
+            ui(lambda: self.running and self.live.configure(
+                text=f"Konwertuję…   ·   rdzenie {CORE_NAMES.get(kind, kind)}"))
+
         while not self.cancel.is_set():
             row = self.next_waiting()
             if not row:
@@ -1090,22 +1361,31 @@ class ConvertTab(FileQueue):
             try:
                 before = row.path.stat().st_size
                 dst = convproc.convert(
-                    row.path, bitrate=bitrate, level=level, denoise=denoise,
-                    cores=self.app.cfg["convert_cores"], recording=self.app.rec_tab.is_recording,
-                    on_cores=lambda k, d: ui(lambda: self._cores_hint(CORE_NAMES.get(k, k))),
+                    row.path, opus_target(row.path, c["convert_out_dir"]), bitrate=c["convert_bitrate"],
+                    level=c["level_convert"], denoise=c["denoise_convert"],
+                    cores=c["convert_cores"], recording=self.app.rec_tab.is_recording, on_cores=on_cores,
                     progress=lambda f, r=row: ui(lambda: r.set_progress(f)),
                     cancel=self.cancel.is_set)
                 after = dst.stat().st_size
                 note = f"{fmt_size(before)} → {fmt_size(after)}"
-                if delete:
-                    if converter.verify(row.path, dst):
-                        row.path.unlink()
-                        self.saved_total += before - after
-                        note += "   ·   oryginał usunięty"
-                    else:
-                        note += "   ·   długość się nie zgadza – oryginał zostawiony!"
-                else:
+                if c["convert_out_dir"]:
+                    note += f"   ·   w „{dst.parent.name}”"
+                if action == "keep":
                     self.potential += before - after
+                elif not converter.verify(row.path, dst):
+                    note += "   ·   długość się nie zgadza – oryginał zostawiony!"
+                elif action == "trash":
+                    try:
+                        to_recycle_bin(row.path)
+                        self.trashed += before - after
+                        note += "   ·   oryginał w Koszu"
+                    except OSError:
+                        log_exc(f"trash {row.path}")
+                        note += "   ·   nie udało się przenieść oryginału do Kosza – zostawiony"
+                else:
+                    row.path.unlink()
+                    self.saved_total += before - after
+                    note += "   ·   oryginał usunięty"
                 ui(lambda r=row, n=note, d=dst: self._row_done(r, n, d))
             except InterruptedError:
                 ui(lambda r=row: (r.set_status("czeka"), r.set_progress(0), r.action.configure(state="normal")))
@@ -1123,13 +1403,15 @@ class ConvertTab(FileQueue):
 
     def _finished(self):
         self.running = False
-        self._cores_hint()
+        self.live.configure(text="")
         self.btn.configure(text="▶  Konwertuj", state="normal",
                            fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"],
                            hover_color=ctk.ThemeManager.theme["CTkButton"]["hover_color"])
         parts = []
         if self.saved_total > 0:
             parts.append(f"Odzyskane miejsce: {fmt_size(self.saved_total)}")
+        if self.trashed > 0:
+            parts.append(f"W Koszu: {fmt_size(self.trashed)} (zwolnisz po opróżnieniu Kosza)")
         if self.potential > 0:
             parts.append(f"Po usunięciu oryginałów odzyskasz: {fmt_size(self.potential)}")
         self.info.configure(text="   ·   ".join(parts))
@@ -1153,7 +1435,7 @@ class RecordTab(ctk.CTkFrame):
 
         # ── Licznik ──
         top = ctk.CTkFrame(self, fg_color="transparent")
-        top.grid(row=0, column=0, pady=(18, 0))
+        top.grid(row=0, column=0, pady=(6, 0))
         self.dot = ctk.CTkLabel(top, text="●", font=ctk.CTkFont(size=30), text_color=MUTED)
         self.dot.pack(side="left", padx=(0, 10))
         self.timer = ctk.CTkLabel(top, text="00:00:00", font=ctk.CTkFont(family="Segoe UI", size=56, weight="bold"))
@@ -1164,7 +1446,7 @@ class RecordTab(ctk.CTkFrame):
 
         # ── Wskaźniki poziomu ──
         meters = ctk.CTkFrame(self, fg_color=CARD, border_color=CARD_BORDER, border_width=1, corner_radius=12)
-        meters.grid(row=2, column=0, sticky="ew", padx=8, pady=(18, 0))
+        meters.grid(row=2, column=0, sticky="ew", padx=8, pady=(12, 0))
         meters.grid_columnconfigure(1, weight=1)
         self.devs_in, self.devs_loop, def_in, def_loop = [], [], None, None
         try:
@@ -1212,7 +1494,7 @@ class RecordTab(ctk.CTkFrame):
         self.btn = ctk.CTkButton(self, text="●   Nagrywaj", width=280, height=58, corner_radius=29,
                                  font=ctk.CTkFont(size=19, weight="bold"),
                                  fg_color=RED, hover_color=RED_HOVER, command=self.toggle)
-        self.btn.grid(row=3, column=0, pady=(24, 10))
+        self.btn.grid(row=3, column=0, pady=(16, 8))
 
         # ── Info o pliku ──
         self.file_lbl = ctk.CTkLabel(self, text="", text_color=MUTED, font=ctk.CTkFont(size=12))
@@ -1228,10 +1510,28 @@ class RecordTab(ctk.CTkFrame):
                                   command=lambda: reveal(self.last_file))
         self._links = links
 
+        # ── Opcje ──
+        ctk.CTkButton(self, text="⚙ Opcje", width=86, fg_color="transparent", border_width=1,
+                      border_color=CARD_BORDER, text_color=("gray20", "gray80"), hover_color=CARD,
+                      command=lambda: RecordOptions(self.app)).place(relx=1.0, x=-6, y=6, anchor="ne")
+        self.grid_rowconfigure(6, weight=1)
+        self.summary = ctk.CTkLabel(self, text="", anchor="w", text_color=MUTED, font=ctk.CTkFont(size=11),
+                                    cursor="hand2", wraplength=540, justify="left")
+        self.summary.grid(row=7, column=0, sticky="ew", padx=12, pady=(2, 2))
+        self.summary.bind("<Button-1>", lambda e: RecordOptions(self.app))
+        self.update_summary()
+
         # Mikrofon NIE jest otwierany w tle – tylko podczas nagrywania
         # albo na 10 s po kliknięciu "Sprawdź poziomy" (żeby nie przeszkadzać Teams itp.).
         self.monitor = None
         self._monitor_job = None
+
+    def update_summary(self):
+        c = self.app.cfg
+        d = Path(c["save_dir"])
+        parts = [f"folder „{d.name or d}”", quality_label(c["bitrate"]),
+                 "wyrównywanie głośności" if c["agc"] else "bez wyrównywania głośności"]
+        self.summary.configure(text="Opcje:  " + "  ·  ".join(parts) + "   (kliknij, żeby zmienić)")
 
     # ── podgląd poziomów bez nagrywania ──
     def start_monitor(self):
@@ -1367,11 +1667,14 @@ class RecordTab(ctk.CTkFrame):
 #  Ustawienia
 # ══════════════════════════════════════════════════════════════════════════
 class SettingsWindow(ctk.CTkToplevel):
+    """⚙ na samej górze: ustawienia całej aplikacji. Opcje nagrywania, transkrypcji
+    i konwersji są w zakładkach (przycisk ⚙ Opcje)."""
+
     def __init__(self, app):
         super().__init__(app)
         self.app = app
-        self.title("Ustawienia")
-        self.geometry("600x380")
+        self.title("Ustawienia aplikacji")
+        self.geometry("520x220")
         self.resizable(False, False)
         self.transient(app)
         self.after(50, self.grab_set)
@@ -1380,51 +1683,25 @@ class SettingsWindow(ctk.CTkToplevel):
         self.grid_columnconfigure(1, weight=1)
         cfg = app.cfg
 
-        def row(r, label, var, browse):
-            ctk.CTkLabel(self, text=label, anchor="w").grid(row=r, column=0, sticky="w", padx=(18, 8), pady=8)
-            ctk.CTkEntry(self, textvariable=var).grid(row=r, column=1, sticky="ew", pady=8)
-            ctk.CTkButton(self, text="…", width=36, command=browse).grid(row=r, column=2, padx=(6, 18), pady=8)
-
-        self.save_dir = ctk.StringVar(value=cfg["save_dir"])
-        row(0, "Folder nagrań", self.save_dir,
-            lambda: self._pick_dir(self.save_dir))
-        ctk.CTkLabel(self, text="Model, urządzenie, format itd.: zakładka Transkrypcja → ⚙ Opcje",
-                     text_color=MUTED, font=ctk.CTkFont(size=11)).grid(row=1, column=1, columnspan=2, sticky="w")
-
-        ctk.CTkLabel(self, text="Jakość nagrania", anchor="w").grid(row=2, column=0, sticky="w", padx=(18, 8), pady=8)
-        self.quality = ctk.CTkSegmentedButton(self, values=["24 kbps", "32 kbps", "48 kbps"])
-        self.quality.set(f"{cfg['bitrate'] // 1000} kbps" if cfg["bitrate"] in (24000, 32000, 48000) else "32 kbps")
-        self.quality.grid(row=2, column=1, sticky="w", pady=8)
-        ctk.CTkLabel(self, text="32 kbps ≈ 14 MB na godzinę – w zupełności wystarcza do mowy",
-                     text_color=MUTED, font=ctk.CTkFont(size=11)).grid(row=3, column=1, columnspan=2, sticky="w")
-
-        self.agc = ctk.CTkSwitch(self, text="Wyrównuj głośność (cisi rozmówcy podgłośnieni do poziomu mowy)")
-        if cfg["agc"]:
-            self.agc.select()
-        self.agc.grid(row=4, column=1, columnspan=2, sticky="w", pady=(10, 4))
-
-        ctk.CTkLabel(self, text="Wygląd", anchor="w").grid(row=5, column=0, sticky="w", padx=(18, 8), pady=8)
+        ctk.CTkLabel(self, text="Wygląd", anchor="w").grid(row=0, column=0, sticky="w", padx=(18, 12), pady=(18, 8))
         self.look = ctk.CTkSegmentedButton(self, values=["Systemowy", "Jasny", "Ciemny"])
         self.look.set({"system": "Systemowy", "light": "Jasny", "dark": "Ciemny"}.get(cfg["appearance"], "Systemowy"))
-        self.look.grid(row=5, column=1, sticky="w", pady=8)
+        self.look.grid(row=0, column=1, sticky="w", pady=(18, 8))
+
+        ctk.CTkLabel(self, text="Opcje nagrywania, transkrypcji i konwersji są w każdej zakładce "
+                                "pod przyciskiem ⚙ Opcje.",
+                     text_color=MUTED, font=ctk.CTkFont(size=11), wraplength=470, justify="left"
+                     ).grid(row=1, column=0, columnspan=2, sticky="w", padx=18, pady=(8, 0))
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.grid(row=6, column=0, columnspan=3, sticky="e", padx=18, pady=(18, 12))
+        btns.grid(row=2, column=0, columnspan=2, sticky="e", padx=18, pady=(24, 12))
         ctk.CTkButton(btns, text="Anuluj", width=90, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
                       command=self.destroy).pack(side="left", padx=6)
         ctk.CTkButton(btns, text="Zapisz", width=90, command=self._save).pack(side="left")
 
-    def _pick_dir(self, var):
-        d = filedialog.askdirectory(parent=self, initialdir=var.get())
-        if d:
-            var.set(str(Path(d)))
-
     def _save(self):
         cfg = self.app.cfg
-        cfg["save_dir"] = self.save_dir.get()
-        cfg["bitrate"] = int(self.quality.get().split()[0]) * 1000
-        cfg["agc"] = bool(self.agc.get())
         cfg["appearance"] = {"Systemowy": "system", "Jasny": "light", "Ciemny": "dark"}[self.look.get()]
         ctk.set_appearance_mode(cfg["appearance"])
         save_config(cfg)
@@ -1442,7 +1719,7 @@ class App(ctk.CTk):
         super().__init__(fg_color=BG)
         self.title(APP_NAME)
         self.geometry("600x720")
-        self.minsize(540, 660)
+        self.minsize(540, 715)
         if ICON_PATH.exists():
             try:
                 self.iconbitmap(str(ICON_PATH))

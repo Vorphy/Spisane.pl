@@ -29,17 +29,31 @@ Wszystkie opcje są w zakładce Transkrypcja → **⚙ Opcje**. Transkrypcja dzi
 o niskim priorytecie, więc okno i nagrywanie nie zwalniają, a pamięć po modelu zwalnia się po kolejce.
 Pierwsza transkrypcja pobiera model (ok. 1–3 GB).
 
+## Ustawienia
+
+- **⚙ na samej górze**: ustawienia całej aplikacji (wygląd).
+- **⚙ Opcje w każdej zakładce**: ustawienia danego tematu. Pod listą widać ich podsumowanie, a kliknięcie je otwiera.
+  - Nagrywanie: folder nagrań, jakość (24/32/48 kbps), wyrównywanie głośności.
+  - Transkrypcja: model, urządzenie, rdzenie, format, monitor folderu.
+  - Konwersja: wszystko poniżej.
+
 ## Konwersja
 
-Zamienia nagrania (np. MP4 z OBS) na małe pliki Opus, opcjonalnie z wyrównaniem głośności
-i usunięciem szumu. Działa w osobnym procesie o niskim priorytecie. **Rdzenie CPU** wybierasz w zakładce:
+Zamienia nagrania (np. MP4 z OBS) na małe pliki Opus. Działa w osobnym procesie o niskim priorytecie.
+W **⚙ Opcje** zakładki ustawiasz:
 
-- **Automatycznie** (domyślnie): rdzenie E podczas nagrywania, P poza nim. Przełącza się w trakcie pliku,
-  gdy zaczniesz albo skończysz nagrywać.
-- **P**, **E** albo **Wszystkie** na stałe.
+- **Jakość pliku** (24/32/48 kbps), niezależnie od jakości nagrywania.
+- **Wyrównanie głośności** i **usuwanie szumu**.
+- **Rdzenie CPU**: **Automatycznie** (domyślnie) to rdzenie E podczas nagrywania i P poza nim, z przełączaniem
+  w trakcie pliku. Można też wybrać na stałe **P**, **E** albo **Wszystkie**.
+- **Oryginał po konwersji**: zostaw, przenieś **do Kosza** (da się przywrócić) albo usuń na stałe.
+  Przed usunięciem aplikacja sprawdza, czy długość nagrania się zgadza.
+- **Zapis wyniku**: obok oryginału albo do wybranego folderu. Istniejące pliki nie są nadpisywane,
+  tylko dostają dopisek (2), (3)…
 
 Konwersja używa jednego wątku. Na i5-1345U nagranie 41 min z wyrównaniem i odszumianiem trwało ok. 1,5 min na P
-i ok. 3 min na E. „Wszystkie” nie przyspiesza. To samo ustawienie dotyczy przygotowania dźwięku przed transkrypcją.
+i ok. 3 min na E. „Wszystkie” nie przyspiesza. Rdzenie, wyrównanie i odszumianie dotyczą też przygotowania
+dźwięku przed transkrypcją.
 
 ## Prywatność
 
