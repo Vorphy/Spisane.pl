@@ -45,8 +45,8 @@ from customtkinter.windows.widgets.scaling.scaling_tracker import ScalingTracker
 # - robi to już w trakcie przeciągania (okno „pływa” duże/małe i miga półprzezroczystością),
 # - liczy monitor dla całego okna, więc na granicy monitorów potrafi skakać tam i z powrotem,
 # - nowe okno dostaje skalę monitora, na którym Windows je najpierw postawi, a potem skacze.
-# Poprawki: skala według ŚRODKA okna; przy wciśniętym lewym przycisku myszy (przeciąganie) bez
-# zmian – przeskalowanie raz, po upuszczeniu; po przeskalowaniu okno wsuwane w całości na monitor;
+# Poprawki: skala według monitora pod lewą częścią paska tytułu (zmienia się od razu przy przeciąganiu,
+# bez skakania); po przeskalowaniu okno wsuwane w całości na monitor;
 # niewidoczne jeszcze okno dostaje skalę monitora okna-rodzica albo zapamiętanej pozycji.
 _u32 = ctypes.windll.user32
 _u32.GetParent.restype = wintypes.HWND
@@ -98,6 +98,14 @@ def _center_monitor(window):
     return _monitor_at((left + right) / 2, (top + bottom) / 2)
 
 
+def _anchor_monitor(window):
+    """Monitor pod lewą częścią paska tytułu (tam, gdzie zwykle chwyta się okno). Zmiana rozmiaru nie
+    przesuwa lewego górnego rogu, więc ten punkt nie „ucieka” na drugi monitor – skala zmienia się od razu
+    przy przeciąganiu, jak w zwykłych programach Windows, i nie skacze tam i z powrotem."""
+    left, top, right, bottom = _window_rect(window)
+    return _monitor_at(left + min(120, (right - left) // 3), top + 12)
+
+
 def _mouse_down():
     return bool(_u32.GetAsyncKeyState(0x01) & 0x8000)
 
@@ -114,20 +122,18 @@ def _dpi_scaling(cls, window):
                 return _monitor_scale(_monitor_at(*_ROOT_POS))
             if master is not None and master.winfo_exists() and master.winfo_toplevel().winfo_viewable():
                 return _monitor_scale(_center_monitor(master.winfo_toplevel()))
-        if _mouse_down() and window in cls.window_dpi_scaling_dict:
-            return cls.window_dpi_scaling_dict[window]       # przeciąganie – przeskaluj po upuszczeniu
-        return _monitor_scale(_center_monitor(window))
+        return _monitor_scale(_anchor_monitor(window))
     except Exception:
         return _orig_dpi(window)
 
 
 def _fit_on_monitor(window):
-    """Wsuń okno w całości w obszar roboczy monitora, na którym jest jego środek."""
+    """Wsuń okno w całości w obszar roboczy jego monitora (nie w trakcie przeciągania – nie walcz z myszą)."""
     try:
-        if not window.winfo_exists() or not window.winfo_viewable():
+        if not window.winfo_exists() or not window.winfo_viewable() or _mouse_down():
             return
         left, top, right, bottom = _window_rect(window)
-        L, T, R, B = _work_area(_center_monitor(window))
+        L, T, R, B = _work_area(_anchor_monitor(window))
         x = int(min(max(left, L), max(L, R - (right - left))))
         y = int(min(max(top, T), max(T, B - (bottom - top))))
         if (x, y) != (left, top):
@@ -209,7 +215,7 @@ def _patch_dimensions(cls):
         try:
             # okno jest już na monitorze o innej skali, a CustomTkinter jeszcze nie przeskalował (do 100 ms,
             # albo dłużej – przeciąganie): rozmiar fizyczny przeliczony starą skalą byłby błędny
-            if abs(_monitor_scale(_center_monitor(self)) - ScalingTracker.window_dpi_scaling_dict.get(self, 0)) > 0.01:
+            if abs(_monitor_scale(_anchor_monitor(self)) - ScalingTracker.window_dpi_scaling_dict.get(self, 0)) > 0.01:
                 return
         except Exception:
             pass
