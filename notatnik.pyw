@@ -1262,6 +1262,7 @@ class ConvertTab(FileQueue):
         super().__init__(master, app, "Dodaj nagrania MP4 (np. z OBS) albo cały folder.\n"
                                       "Powstanie plik .opus – wielokrotnie mniejszy.")
         self.running = False
+        self._started = 0.0
         self.worker = None
         self.cancel = threading.Event()
         self.saved_total = 0      # faktycznie odzyskane (oryginały usunięte na stałe)
@@ -1322,6 +1323,8 @@ class ConvertTab(FileQueue):
 
     def toggle(self):
         if self.running:
+            if time.monotonic() - self._started < 1.5:     # podwójne kliknięcie „Konwertuj” – nie zatrzymuj
+                return
             self.cancel.set()
             self.btn.configure(text="Zatrzymuję…", state="disabled")
             return
@@ -1341,6 +1344,7 @@ class ConvertTab(FileQueue):
                 parent=self):
             return
         self.running = True
+        self._started = time.monotonic()
         self.cancel.clear()
         self.btn.configure(text="■  Zatrzymaj", fg_color=RED, hover_color=RED_HOVER)
         self.live.configure(text="Konwertuję…")
@@ -1406,7 +1410,8 @@ class ConvertTab(FileQueue):
 
     def _finished(self):
         self.running = False
-        self.live.configure(text="")
+        self.live.configure(text="Zatrzymano – „Konwertuj” zacznie przerwany plik od nowa."
+                            if self.cancel.is_set() else "")
         self.btn.configure(text="▶  Konwertuj", state="normal",
                            fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"],
                            hover_color=ctk.ThemeManager.theme["CTkButton"]["hover_color"])
