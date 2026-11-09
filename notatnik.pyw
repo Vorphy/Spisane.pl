@@ -156,6 +156,29 @@ def _tk_nc_error(window):
             (bottom - top - cr.bottom) - (tk_nc.bottom - tk_nc.top)), (cr.right, cr.bottom)
 
 
+def _apply_min_max(window, want=None):
+    """Minimum/maksimum okna w skali jego monitora, z poprawką na błąd Tk (zamiast wersji z CustomTkinter,
+    która przez ten błąd rozpychała wnętrze o 6 px). Zwraca obecny rozmiar wnętrza."""
+    s = ScalingTracker.get_window_scaling(window)
+    (dx, dy), client = _tk_nc_error(window)
+    if getattr(window, "_drag_lock", None):
+        # przeciąganie trwa: rozmiar zablokowany (min = max), bo Windows po puszczeniu przycisku
+        # przywraca rozmiar sprzed przeciągania – zob. _watch_release
+        w0, h0 = window._drag_lock
+        want = want or (round(w0 * s), round(h0 * s))
+        tkinter.Wm.wm_minsize(window, want[0] + dx, want[1] + dy)
+        tkinter.Wm.wm_maxsize(window, want[0] + dx, want[1] + dy)
+    else:
+        mn_w, mn_h = getattr(window, "_min_width", 0) or 0, getattr(window, "_min_height", 0) or 0
+        tkinter.Wm.wm_minsize(window, max(1, round(mn_w * s) + dx), max(1, round(mn_h * s) + dy))
+        mx_w, mx_h = getattr(window, "_max_width", None), getattr(window, "_max_height", None)
+        if mx_w and mx_h and mx_w < 100000:
+            tkinter.Wm.wm_maxsize(window, round(mx_w * s) + dx, round(mx_h * s) + dy)
+        else:
+            tkinter.Wm.wm_maxsize(window, 100000, 100000)
+    return client
+
+
 def _fix_client_size(window, w0=None, h0=None):
     """Ustaw wnętrze okna dokładnie na rozmiar logiczny × skala, z poprawką na błąd Tk (zob. _tk_nc_error);
     tak samo minimum/maksimum – inaczej okno na monitorze o innej skali było za duże i rosło przy przejściach."""
@@ -165,13 +188,8 @@ def _fix_client_size(window, w0=None, h0=None):
         w0 = w0 or window._current_width
         h0 = h0 or window._current_height
         s = ScalingTracker.get_window_scaling(window)
-        (dx, dy), client = _tk_nc_error(window)
         want = (round(w0 * s), round(h0 * s))
-        mn_w, mn_h = getattr(window, "_min_width", 0) or 0, getattr(window, "_min_height", 0) or 0
-        tkinter.Wm.wm_minsize(window, max(1, round(mn_w * s) + dx), max(1, round(mn_h * s) + dy))
-        mx_w, mx_h = getattr(window, "_max_width", None), getattr(window, "_max_height", None)
-        if mx_w and mx_h and mx_w < 100000:
-            tkinter.Wm.wm_maxsize(window, round(mx_w * s) + dx, round(mx_h * s) + dy)
+        client = _apply_min_max(window, want)
         # rozmiar: Tk myli się tu inaczej niż przy min/max – ustaw, zmierz faktyczne wnętrze, popraw o różnicę
         gw, gh = want
         for _ in range(3):
@@ -191,8 +209,17 @@ def _fix_client_size(window, w0=None, h0=None):
 def _update_and_fit(cls, window):
     # przez chwilę po zmianie skali zdarzenia <Configure> niosą jeszcze STARY rozmiar fizyczny –
     # CustomTkinter przeliczyłby go nową skalą i „zapamiętał” złe wymiary (okno rosło po każdym przejściu)
-    w0, h0 = getattr(window, "_current_width", None), getattr(window, "_current_height", None)
+    lock = getattr(window, "_drag_lock", None)
+    w0, h0 = lock or (getattr(window, "_current_width", None), getattr(window, "_current_height", None))
     window._dims_frozen_until = time.monotonic() + 1.6
+    if _mouse_down():
+        # zmiana skali w trakcie przeciągania: Windows pamięta rozmiar okna sprzed przeciągania i przywraca go
+        # w chwili puszczenia przycisku. CustomTkinter blokuje rozmiar tylko na 1 s – przy wolnym przeciąganiu
+        # blokada znikała, a przywrócony rozmiar fizyczny zapisywał się jako nowy logiczny (okno rosło 1,5×
+        # po każdym przejściu). Blokada trwa więc do puszczenia przycisku.
+        window._drag_lock = (w0, h0)
+        if not lock:
+            window.after(50, lambda: _watch_release(window))
     _orig_update(window)
 
     try:
@@ -204,13 +231,64 @@ def _update_and_fit(cls, window):
         pass
 
 
+def _watch_release(window):
+    """Po przeciąganiu ze zmianą skali: czekaj na puszczenie przycisku, przeczekaj „powrót” rozmiaru,
+    który robi Windows, i przywróć rozmiar logiczny sprzed przeciągania."""
+    try:
+        if not window.winfo_exists():
+            return
+        if _mouse_down():
+            window.after(50, lambda: _watch_release(window))
+            return
+        w0, h0 = window._drag_lock
+        window._dims_frozen_until = time.monotonic() + 1.0
+
+        def finish():
+            window._drag_lock = None
+            _fix_client_size(window, w0, h0)
+            _fit_on_monitor(window)
+        window.after(150, finish)
+        window.after(700, lambda: _fix_client_size(window, w0, h0))
+    except Exception:
+        window._drag_lock = None
+
+
 def _patch_dimensions(cls):
     """Błędy CustomTkinter: block_update_dimensions_event() ustawiał False (blokada nie działała),
     a zdarzenia rozmiaru tuż po zmianie skali psuły zapamiętane wymiary okna."""
     orig = cls._update_dimensions_event
+    orig_min_max = cls._set_scaled_min_max
+
+    def set_scaled_min_max(self):
+        try:
+            if self.winfo_viewable():
+                _apply_min_max(self)                  # z poprawką; w trakcie przeciągania blokada zostaje
+                return
+        except Exception:
+            pass
+        orig_min_max(self)
 
     def update_dimensions(self, event=None):
-        if time.monotonic() < getattr(self, "_dims_frozen_until", 0):
+        try:
+            if not self.winfo_viewable():       # ukryte (start, okno opcji przed pokazaniem): Tk podaje
+                return                          # domyślne 200×200 – to nie jest rozmiar okna
+        except Exception:
+            pass
+        try:
+            # okno na granicy monitorów: Windows rysuje ramkę w skali monitora, na którym jest WIĘKSZOŚĆ okna
+            # (może być inny niż pod paskiem tytułu) – ramka się zmienia, wnętrze kurczy/rośnie o kilka px.
+            # To nie zmiana rozmiaru przez użytkownika: zostaw rozmiar logiczny, przywróć wnętrze.
+            wdpi = _u32.GetDpiForWindow(_frame_hwnd(self))
+            last = getattr(self, "_frame_dpi", None)
+            self._frame_dpi = wdpi
+            if last is not None and wdpi != last and not getattr(self, "_drag_lock", None):
+                self._dims_frozen_until = max(getattr(self, "_dims_frozen_until", 0), time.monotonic() + 0.5)
+                w0, h0 = self._current_width, self._current_height
+                self.after(60, lambda: _fix_client_size(self, w0, h0))
+                return
+        except Exception:
+            pass
+        if getattr(self, "_drag_lock", None) or time.monotonic() < getattr(self, "_dims_frozen_until", 0):
             return
         try:
             # okno jest już na monitorze o innej skali, a CustomTkinter jeszcze nie przeskalował (do 100 ms,
@@ -225,6 +303,7 @@ def _patch_dimensions(cls):
         self._block_update_dimensions_event = True
 
     cls._update_dimensions_event = update_dimensions
+    cls._set_scaled_min_max = set_scaled_min_max
     cls.block_update_dimensions_event = block
 
 
