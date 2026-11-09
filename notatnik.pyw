@@ -304,6 +304,20 @@ class FileQueue(ctk.CTkFrame):
             self.empty.grid()
         for i, r in enumerate(self.rows):
             r.grid(row=i + 1, column=0, sticky="ew", pady=4, padx=(0, 4))
+        self.start_hint()
+
+    START_VERB = ""            # nazwa przycisku startu, np. "Konwertuj"
+
+    def start_hint(self):
+        """„czeka” nie znaczy, że ruszy samo – podpowiedz, że trzeba kliknąć start."""
+        live = getattr(self, "live", None)
+        if live is None or getattr(self, "running", False):
+            return
+        hint = f"Pliki czekają w kolejce – kliknij „▶ {self.START_VERB}”, żeby zacząć."
+        if self.next_waiting():
+            live.configure(text=hint)
+        elif live.cget("text") == hint:
+            live.configure(text="")
 
     def next_waiting(self):
         return next((r for r in self.rows if r.status in ("czeka", "do wznowienia")), None)
@@ -313,6 +327,7 @@ class FileQueue(ctk.CTkFrame):
 #  Zakładka: Transkrypcja
 # ══════════════════════════════════════════════════════════════════════════
 class TranscribeTab(FileQueue):
+    START_VERB = "Transkrybuj"
     WATCH_EVERY = 3.0          # co ile sekund sprawdzać monitorowany folder (jak fw-dd.py -W)
 
     def __init__(self, master, app):
@@ -1258,6 +1273,8 @@ class ConvertOptions(OptionsDialog):
 #  Zakładka: Konwersja
 # ══════════════════════════════════════════════════════════════════════════
 class ConvertTab(FileQueue):
+    START_VERB = "Konwertuj"
+
     def __init__(self, master, app):
         super().__init__(master, app, "Dodaj nagrania MP4 (np. z OBS) albo cały folder.\n"
                                       "Powstanie plik .opus – wielokrotnie mniejszy.")
