@@ -384,7 +384,10 @@ class TranscribeTab(FileQueue):
 
     def _watch_label(self):
         d = Path(self.app.cfg["watch_dir"])
-        self.watch_sw.configure(text=f"Monitoruj folder „{d.name or d}” (nowe nagrania od razu do transkrypcji)")
+        name = d.name or str(d)
+        if len(name) > 22:                     # obok jest przycisk – długa nazwa by się ucięła
+            name = name[:21] + "…"
+        self.watch_sw.configure(text=f"Monitoruj folder „{name}”")   # co robi – widać w linii nad nim
 
     def _watch_changed(self):
         self.watching = bool(self.watch_sw.get())
