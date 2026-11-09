@@ -43,6 +43,7 @@ dla tego pliku kroki, które już były, i pokazują to w jego wierszu. Dzięki 
 ## Ustawienia
 
 - **⚙ na samej górze**: ustawienia całej aplikacji (wygląd).
+- **📌 obok ⚙**: okno zawsze na wierzchu (włącz albo wyłącz jednym kliknięciem; aplikacja to zapamiętuje).
 - **⚙ Opcje w każdej zakładce**: ustawienia danego tematu. Pod listą widać ich podsumowanie, a kliknięcie je otwiera.
   - Nagrywanie: folder nagrań, jakość (24/32/48 kbps), obróbka po nagraniu, zachowanie surowego nagrania.
   - Transkrypcja: model, urządzenie, rdzenie, format, monitor folderu.
