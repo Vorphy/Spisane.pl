@@ -19,3 +19,6 @@ __pycache__/
 !requirements.txt
 *.transcribe_state
 przetworzone/
+
+# notatki z prac z Claude (prywatne)
+claude-pamiec-notatnik.md
