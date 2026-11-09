@@ -9,6 +9,7 @@ Uruchomienie: pythonw notatnik.pyw   (albo skrót „Notatnik spotkań”)
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -45,7 +46,10 @@ DEFAULTS = {
     "mic_name": None,
     "loop_name": None,
     "bitrate": 32000,
-    "agc": True,
+    "agc": True,                 # wyrównywanie na żywo – osobno mikrofon i rozmówcy
+    "post_level": True,          # po nagraniu: wyrównanie głośności gotowego pliku
+    "post_denoise": True,        # po nagraniu: usunięcie szumu
+    "keep_raw": False,           # po obróbce zachowaj surowe nagranie w podfolderze "surowe"
     "pause_while_recording": True,
     "convert_bitrate": None,     # None = jak nagrywanie (migracja ze wspólnego "bitrate")
     "original_action": None,     # keep / trash / delete (migracja z dawnego "delete_original")
@@ -71,6 +75,8 @@ MUTED = ("#6B7280", "#9CA3AF")
 CARD = ("#F3F4F6", "#23262B")
 CARD_BORDER = ("#E5E7EB", "#30343A")
 BG = ("#FFFFFF", "#17191C")
+
+AMBER = ("#B45309", "#FBBF24")
 
 STATUS_COLORS = {
     "czeka": MUTED, "w toku": ("#2563EB", "#60A5FA"), "gotowe": GREEN,
@@ -138,6 +144,27 @@ def opus_target(src, out_dir=""):
     return dst
 
 
+def processing_plan(path, level, denoise):
+    """Kroki do wykonania z pominięciem tych, które plik już przeszedł (znacznik w pliku Opus).
+    Zwraca (level, denoise, notka_dla_wiersza)."""
+    info = converter.read_processing(path) if Path(path).suffix.lower() in (".opus", ".ogg") else None
+    if not info:
+        return level, denoise, ""
+    done = info["steps"]
+    what = " i ".join(x for x, k in (("wyrównany", "level"), ("odszumiony", "denoise")) if k in done)
+    where = {"nagrywanie": "po nagraniu", "konwersja": "przy konwersji"}.get(info["source"], "")
+    try:
+        when = datetime.strptime(info["when"], "%Y-%m-%d %H:%M").strftime("%d.%m, %H:%M")
+    except ValueError:
+        when = info["when"]
+    note = "⚠ Już " + what + (f" {where}" if where else "") + (f" ({when})" if when else "")
+    off = [x for x, k, on in (("wyrównanie", "level", level), ("usuwanie szumu", "denoise", denoise))
+           if on and k in done]
+    if off:
+        note += " – " + " i ".join(off) + " wyłączone dla tego pliku"
+    return level and "level" not in done, denoise and "denoise" not in done, note
+
+
 def save_config(cfg):
     try:
         CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -203,9 +230,19 @@ class FileRow(ctk.CTkFrame):
                                     text_color=MUTED, command=lambda: on_remove(self))
         self.action.grid(row=0, column=2, rowspan=2, padx=(0, 8), pady=6)
 
+        self.note = ctk.CTkLabel(self, text="", anchor="w", text_color=AMBER, font=ctk.CTkFont(size=11))
+
         self.bar = ctk.CTkProgressBar(self, height=6, corner_radius=3)
         self.bar.set(0)
-        self.bar.grid(row=2, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 10))
+        self.bar.grid(row=3, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 10))
+
+    def set_note(self, text):
+        """Informacja o pliku (np. że był już obrobiony) – bursztynowa, pod ścieżką."""
+        self.note.configure(text=text)
+        if text:
+            self.note.grid(row=2, column=0, columnspan=2, sticky="ew", padx=(12, 6))
+        else:
+            self.note.grid_remove()
 
     def set_status(self, status, detail=None):
         self.status = status
@@ -448,6 +485,8 @@ class TranscribeTab(FileQueue):
             row.limit.grid(row=1, column=1, sticky="e", padx=4)
             row.limit.bind("<FocusOut>", lambda e, r=row: self._check_limit(r))
             row.limit.bind("<Return>", lambda e, r=row: self._check_limit(r))
+        row.set_note(processing_plan(row.path, self.app.cfg["level_transcribe"],
+                                     self.app.cfg["denoise_transcribe"])[2])
         state = None
         for st in (row.path.with_suffix(".transcribe_state"), leveled_tmp(row.path).with_suffix(".transcribe_state")):
             if st.exists():
@@ -586,6 +625,9 @@ class TranscribeTab(FileQueue):
         if row.path == self.app.rec_tab.current_path():
             self.live.configure(text="⏸  Ten plik jest właśnie nagrywany – czekam…")
             return
+        if row.path in self.app.rec_tab.processing:
+            self.live.configure(text="⏸  Nagranie jest jeszcze przetwarzane po zakończeniu – czekam…")
+            return
         limit = self._check_limit(row)
         if limit is None:
             row.set_status("błąd", "Przytnij do: wpisz minuty (np. 45) albo GG:MM:SS (np. 01:15:00)")
@@ -595,8 +637,9 @@ class TranscribeTab(FileQueue):
         row.limit.configure(state="disabled")
         row.set_status("w toku")
         row.action.configure(state="disabled")
-        level = self.app.cfg["level_transcribe"]
-        denoise = self.app.cfg["denoise_transcribe"]
+        level, denoise, note = processing_plan(row.path, self.app.cfg["level_transcribe"],
+                                               self.app.cfg["denoise_transcribe"])
+        row.set_note(note)              # plik mógł zostać obrobiony po dodaniu do kolejki
         tmp = leveled_tmp(row.path)
         if tmp.exists() and tmp.with_suffix(".transcribe_state").exists():
             self._launch(row, tmp)            # wznowienie – kopia już jest
@@ -1120,10 +1163,10 @@ class OptionsDialog(ctk.CTkToplevel):
 
 
 class RecordOptions(OptionsDialog):
-    KEYS = ("save_dir", "bitrate", "agc")
+    KEYS = ("save_dir", "bitrate", "agc", "post_level", "post_denoise", "keep_raw")
 
     def __init__(self, app):
-        super().__init__(app, "Opcje nagrywania", "620x420")
+        super().__init__(app, "Opcje nagrywania", "640x640")
         cfg = app.cfg
         self.save_dir = ctk.StringVar(value=cfg["save_dir"])
         self._place("Folder nagrań", self._folder_field(self.save_dir),
@@ -1135,11 +1178,34 @@ class RecordOptions(OptionsDialog):
                     "24 kbps ≈ 11 MB na godzinę · 32 kbps ≈ 14 MB · 48 kbps ≈ 22 MB.\n"
                     "32 kbps w zupełności wystarcza do mowy.")
 
-        self.agc = ctk.CTkSwitch(self.body, text="cisi rozmówcy podgłośnieni do poziomu mowy")
+        self.post_level = ctk.CTkSwitch(self.body, text="wyrównaj głośność", command=self._sync)
+        if cfg["post_level"]:
+            self.post_level.select()
+        self._place("Po nagraniu", self.post_level)
+        self.post_denoise = ctk.CTkSwitch(self.body, text="usuń szum tła")
+        if cfg["post_denoise"]:
+            self.post_denoise.select()
+        self._place("", self.post_denoise,
+                    "Mikrofon i rozmówcy są nagrywani osobno, a po nagraniu każdy jest obrabiany oddzielnie "
+                    "(własny profil szumu i poziom) i dopiero wtedy łączony. Trwa ok. 3–5 min na godzinę "
+                    "nagrania (rdzenie jak w Opcjach konwersji). Transkrypcja i konwersja nie powtórzą tych kroków.")
+
+        self.agc = ctk.CTkSwitch(self.body, text="wyrównuj na żywo")
         if cfg["agc"]:
             self.agc.select()
-        self._place("Wyrównywanie głośności", self.agc,
-                    "na bieżąco, osobno dla mikrofonu i dla rozmówców")
+        self.agc_hint = self._place("Zapasowo", self.agc, " ")
+        self.keep_raw = ctk.CTkSwitch(self.body, text="zachowaj surowe nagranie w podfolderze „surowe”")
+        if cfg["keep_raw"]:
+            self.keep_raw.select()
+        self._place("", self.keep_raw, "Domyślnie obrobiony plik zastępuje surowy.")
+        self._sync()
+
+    def _sync(self):
+        post = bool(self.post_level.get())
+        self.agc.configure(state="disabled" if post else "normal")
+        self.agc_hint.configure(text="Nieużywane, bo głośność wyrówna się po nagraniu (dokładniej)." if post else
+                                "Lekkie wyrównywanie w trakcie, osobno mikrofon i rozmówcy – "
+                                "gdy nie chcesz wyrównania po nagraniu.")
 
         ctk.CTkLabel(self.body, text="Zmiany obowiązują od następnego nagrania. Mikrofon i głośniki "
                                      "wybierasz bezpośrednio w zakładce Nagrywanie.",
@@ -1161,6 +1227,9 @@ class RecordOptions(OptionsDialog):
         cfg["save_dir"] = str(Path(d))
         cfg["bitrate"] = quality_value(self.quality.get())
         cfg["agc"] = bool(self.agc.get())
+        cfg["post_level"] = bool(self.post_level.get())
+        cfg["post_denoise"] = bool(self.post_denoise.get())
+        cfg["keep_raw"] = bool(self.keep_raw.get())
         save_config(cfg)
         self._changed()
         self.destroy()
@@ -1337,6 +1406,7 @@ class ConvertTab(FileQueue):
             row.detail.configure(text=f"{row.path.parent}   ·   {fmt_size(row.path.stat().st_size)}")
         except OSError:
             pass
+        row.set_note(processing_plan(row.path, self.app.cfg["level_convert"], self.app.cfg["denoise_convert"])[2])
 
     def toggle(self):
         if self.running:
@@ -1382,11 +1452,12 @@ class ConvertTab(FileQueue):
             if not row:
                 break
             ui(lambda r=row: (r.set_status("w toku"), r.action.configure(state="disabled")))
+            level, denoise, _ = processing_plan(row.path, c["level_convert"], c["denoise_convert"])
             try:
                 before = row.path.stat().st_size
                 dst = convproc.convert(
                     row.path, opus_target(row.path, c["convert_out_dir"]), bitrate=c["convert_bitrate"],
-                    level=c["level_convert"], denoise=c["denoise_convert"],
+                    level=level, denoise=denoise,
                     cores=c["convert_cores"], recording=self.app.rec_tab.is_recording, on_cores=on_cores,
                     progress=lambda f, r=row: ui(lambda: r.set_progress(f)),
                     cancel=self.cancel.is_set)
@@ -1551,11 +1622,19 @@ class RecordTab(ctk.CTkFrame):
         self.monitor = None
         self._monitor_job = None
 
+        # Obróbka gotowych nagrań (wyrównanie / szum) – osobny proces, jak konwersja.
+        self.processing = set()            # ścieżki nagrań w trakcie obróbki (transkrypcja na nie czeka)
+        self.post_cancel = threading.Event()
+        self.post_threads = []
+
     def update_summary(self):
         c = self.app.cfg
         d = Path(c["save_dir"])
+        post = [x for x, on in (("wyrównanie", c["post_level"]), ("bez szumu", c["post_denoise"])) if on]
         parts = [f"folder „{d.name or d}”", quality_label(c["bitrate"]),
-                 "wyrównywanie głośności" if c["agc"] else "bez wyrównywania głośności"]
+                 "po nagraniu: " + (" + ".join(post) if post else "bez obróbki")]
+        if not c["post_level"]:
+            parts.append("wyrównywanie na żywo" if c["agc"] else "bez wyrównywania")
         self.summary.configure(text="Opcje:  " + "  ·  ".join(parts) + "   (kliknij, żeby zmienić)")
 
     # ── podgląd poziomów bez nagrywania ──
@@ -1618,8 +1697,11 @@ class RecordTab(ctk.CTkFrame):
         loop = self._dev_index(self.devs_loop, self.loop_var.get())
         self.stop_monitor()
         try:
-            self.rec = recorder.Recorder(path, mic, loop, bitrate=self.app.cfg["bitrate"],
-                                         agc=self.app.cfg["agc"])
+            c = self.app.cfg
+            # Wariant B: mikrofon i rozmówcy w osobnych kanałach; po nagraniu każdy obrabiany osobno
+            # i miksowany do mono. Na żywo wyrównujemy tylko wtedy, gdy nie będzie wyrównania po nagraniu.
+            self.rec = recorder.Recorder(path, mic, loop, bitrate=c["bitrate"],
+                                         agc=c["agc"] and not c["post_level"], stereo=True)
             self.rec.start()
         except Exception as e:
             log_exc("record start")
@@ -1658,7 +1740,70 @@ class RecordTab(ctk.CTkFrame):
             self.show.pack(side="left", padx=4)
             self.to_tr.configure(state="normal", text="Dodaj do transkrypcji")
             self._links.grid()
+            if not rec.error:
+                self._post_process(rec.path)       # zawsze: przynajmniej miks kanałów do mono
         self.app.update_title()
+
+    # ── obróbka po nagraniu ──
+    def _post_status(self, text, color=MUTED):
+        if not self.rec:                     # podczas kolejnego nagrania etykieta należy do niego
+            self.state_lbl.configure(text=text, text_color=color)
+
+    def _post_process(self, path):
+        c = dict(self.app.cfg)
+        level, denoise, keep = c["post_level"], c["post_denoise"], c["keep_raw"]
+        what = " i ".join(x for x, on in (("wyrównuję głośność", level), ("usuwam szum", denoise)) if on) \
+            or "łączę ścieżki"
+        tmp = path.with_name(path.stem + ".obrobka.tmp")      # bez rozszerzenia audio – monitor go nie weźmie
+        self.processing.add(path)
+        self._post_status(f"Zapisano ✓  Teraz {what}…")
+        ui = self.app.ui
+
+        def work():
+            err = None
+            try:
+                convproc.convert(path, tmp, bitrate=c["bitrate"], level=level, denoise=denoise,
+                                 cores=c["convert_cores"], recording=self.is_recording, source="nagrywanie",
+                                 split_channels=True,
+                                 progress=lambda f: ui(lambda: self._post_status(
+                                     f"Zapisano ✓  Teraz {what}… {f:.0%}")),
+                                 cancel=self.post_cancel.is_set)
+                if not converter.verify(path, tmp):
+                    raise RuntimeError("długość po obróbce się nie zgadza")
+                if keep:
+                    raw = opus_target(path, path.parent / "surowe")
+                    raw.parent.mkdir(exist_ok=True)
+                    shutil.copy2(path, raw)
+                os.replace(tmp, path)          # ten sam folder – podmiana w jednym kroku
+            except InterruptedError:
+                err = "stop"
+            except Exception as e:
+                log_exc(f"obróbka nagrania {path}")
+                err = str(e)
+            if err:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            ui(lambda: self._post_done(path, err))
+
+        t = threading.Thread(target=work, daemon=True)
+        self.post_threads = [x for x in self.post_threads if x.is_alive()] + [t]
+        t.start()
+
+    def _post_done(self, path, err):
+        self.processing.discard(path)
+        if err == "stop":
+            return
+        if err:
+            self._post_status(f"Obróbka się nie udała – zostało surowe nagranie ({err})", RED)
+            return
+        self._post_status("Zapisano i obrobiono ✓" if (self.app.cfg["post_level"] or self.app.cfg["post_denoise"])
+                          else "Zapisano ✓", GREEN)
+        if not self.rec and self.last_file == path and path.exists():
+            parts = self.file_lbl.cget("text").split("   ·   ")
+            if len(parts) == 3:
+                self.file_lbl.configure(text=f"{parts[0]}   ·   {parts[1]}   ·   {fmt_size(path.stat().st_size)}")
 
     def _to_transcribe(self):
         if self.last_file and self.last_file.exists():
@@ -1825,12 +1970,17 @@ class App(ctk.CTk):
             busy.append("trwa transkrypcja (stan zostanie zapisany do wznowienia)")
         if self.conv_tab.busy:
             busy.append("trwa konwersja (bieżący plik zostanie przerwany)")
+        if self.rec_tab.processing:
+            busy.append("trwa obróbka nagrania (zostanie surowe nagranie)")
         if busy and not messagebox.askyesno(APP_NAME, "Na pewno zamknąć?\n\n• " + "\n• ".join(busy), parent=self):
             return
         if self.rec_tab.is_recording():
             self.rec_tab.stop()
         self.tr_tab.shutdown()
         self.conv_tab.cancel.set()
+        self.rec_tab.post_cancel.set()
+        for t in self.rec_tab.post_threads:     # proces obróbki dostaje kill w ciągu ~0,5 s
+            t.join(timeout=3)
         self.rec_tab.stop_monitor()
         self.destroy()
 

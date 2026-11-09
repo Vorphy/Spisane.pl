@@ -1,6 +1,8 @@
 """
 recorder.py – nagrywanie dźwięku z głośników (WASAPI loopback) + mikrofonu,
 miksowanie do mono i zapis na bieżąco do pliku Opus (PyAV, bez ffmpeg).
+Tryb stereo=True: lewy kanał = mikrofon, prawy = rozmówcy (bez miksu) – do obróbki każdego osobno
+po nagraniu (converter.convert_to_opus(split_channels=True) miksuje potem do mono).
 
 Mikrofon jest "zegarem": co jego blok bierzemy tyle samo próbek z loopbacku.
 Loopback w WASAPI nie dostarcza danych, gdy nic nie gra – wtedy dopełniamy ciszą.
@@ -165,9 +167,10 @@ class LevelMonitor:
 class Recorder:
     """Użycie: r = Recorder(path, mic_idx, loop_idx); r.start(); ... r.stop()"""
 
-    def __init__(self, path, mic_index, loop_index, bitrate=32000, agc=True):
+    def __init__(self, path, mic_index, loop_index, bitrate=32000, agc=True, stereo=False):
         self.path = Path(path)
         self.agc = agc
+        self.stereo = stereo
         self.mic_index = mic_index
         self.loop_index = loop_index
         self.bitrate = bitrate
@@ -227,8 +230,8 @@ class Recorder:
         try:
             out = av.open(str(self.path), "w", format="ogg",
                           options={"flush_packets": "1"})  # zapis na bieżąco
-            st = out.add_stream("libopus", rate=RATE, layout="mono")
-            st.bit_rate = self.bitrate
+            st = out.add_stream("libopus", rate=RATE, layout="stereo" if self.stereo else "mono")
+            st.bit_rate = self.bitrate * (2 if self.stereo else 1)   # plik pośredni – bez straty na kanał
             mic_buf = np.zeros(0, np.float32)
             loop_buf = np.zeros(0, np.float32)
             pts = 0
@@ -268,10 +271,21 @@ class Recorder:
                         b = np.pad(b, (0, n - len(b)))
                     if agc_b:
                         b = agc_b.process(b)
-                    a = a + b
-                a = np.tanh(a)  # miękki limiter – suma dwóch źródeł nie przesteruje
-                frame = av.AudioFrame.from_ndarray(
-                    (a * 32767).astype(np.int16).reshape(1, -1), format="s16", layout="mono")
+                else:
+                    b = None
+                if self.stereo:
+                    mic, loop = (a, b) if clock is self.mic else (None, a)
+                    z = np.zeros(n, np.float32)
+                    pcm = np.stack([np.tanh(mic if mic is not None else z),
+                                    np.tanh(loop if loop is not None else z)], axis=1)   # przeplot L/R
+                    frame = av.AudioFrame.from_ndarray(
+                        (pcm * 32767).astype(np.int16).reshape(1, -1), format="s16", layout="stereo")
+                else:
+                    if b is not None:
+                        a = a + b
+                    a = np.tanh(a)  # miękki limiter – suma dwóch źródeł nie przesteruje
+                    frame = av.AudioFrame.from_ndarray(
+                        (a * 32767).astype(np.int16).reshape(1, -1), format="s16", layout="mono")
                 frame.sample_rate = RATE
                 frame.pts = pts
                 pts += n

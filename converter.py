@@ -8,9 +8,31 @@ w oknie) zostają nietknięte – szum nie jest podgłaśniany. Pamięć: tylko 
 (~180 tys. liczb na godzinę), nie całe audio.
 """
 
+from datetime import datetime
 from pathlib import Path
 import numpy as np
 import av
+
+# Znacznik obróbki zapisywany w pliku Opus (metadane strumienia) – żeby nie obrabiać dwa razy.
+TAG_STEPS = "NOTATNIK_OBROBKA"     # np. "level,denoise"
+TAG_WHEN = "NOTATNIK_KIEDY"        # np. "2026-11-09 11:26"
+TAG_SOURCE = "NOTATNIK_ZRODLO"     # "nagrywanie" / "konwersja"
+
+
+def read_processing(path):
+    """Co już zrobiono z plikiem: {"steps": {"level", "denoise"}, "when": str, "source": str} albo None."""
+    try:
+        with av.open(str(path)) as c:
+            md = {}
+            for s in c.streams.audio[:1]:
+                md.update({k.upper(): v for k, v in s.metadata.items()})
+            md.update({k.upper(): v for k, v in c.metadata.items()})
+    except Exception:
+        return None
+    steps = {x for x in md.get(TAG_STEPS, "").split(",") if x in ("level", "denoise")}
+    if not steps:
+        return None
+    return {"steps": steps, "when": md.get(TAG_WHEN, ""), "source": md.get(TAG_SOURCE, "")}
 
 RATE = 48000
 FRAME = 960                 # 20 ms
@@ -37,27 +59,50 @@ def probe_duration(path):
         return last
 
 
-def _decode_mono(path, cancel=None, progress=None):
-    """Generator bloków float32 mono 48 kHz."""
+def channel_count(path):
+    try:
+        with av.open(str(path)) as c:
+            a = c.streams.audio[0]
+            return a.codec_context.channels or a.channels
+    except Exception:
+        return 0
+
+
+def _decode(path, cancel=None, progress=None, channel=None):
+    """Generator bloków float32 48 kHz.
+    channel=None – mono (kanały zmiksowane), 0/1 – jeden kanał pliku stereo, "both" – tablica (2, n)."""
+    stereo = channel is not None
     with av.open(str(path)) as inp:
         if not inp.streams.audio:
             raise ValueError("Plik nie zawiera ścieżki dźwiękowej")
         ain = inp.streams.audio[0]
         total = (inp.duration / 1_000_000) if inp.duration else None
-        rs = av.AudioResampler(format="s16", layout="mono", rate=RATE)
+        rs = av.AudioResampler(format="s16", layout="stereo" if stereo else "mono", rate=RATE)
         last = -1.0
+
+        def conv(rf):
+            x = rf.to_ndarray().reshape(-1).astype(np.float32) / 32768
+            if not stereo:
+                return x
+            x = x.reshape(-1, 2).T               # s16 stereo (przeplot) -> (2, n)
+            return x if channel == "both" else x[channel]
+
         for frame in inp.decode(ain):
             if cancel and cancel():
                 raise InterruptedError("Przerwano")
             for rf in rs.resample(frame):
-                yield rf.to_ndarray().reshape(-1).astype(np.float32) / 32768
+                yield conv(rf)
             if progress and total and frame.time is not None:
                 f = min(1.0, frame.time / total)
                 if f - last >= 0.01:
                     progress(f)
                     last = f
         for rf in rs.resample(None):
-            yield rf.to_ndarray().reshape(-1).astype(np.float32) / 32768
+            yield conv(rf)
+
+
+def _decode_mono(path, cancel=None, progress=None):
+    return _decode(path, cancel, progress)
 
 
 def _activity(db):
@@ -185,14 +230,62 @@ def _soft_clip(y):
     return y
 
 
-def convert_to_opus(src, dst=None, bitrate=32000, progress=None, cancel=None, level=False, denoise=False):
+def _analyze(src, level, denoise, cancel, prog, channel=None):
+    """Przebiegi analizy jednego sygnału (mono albo jednego kanału) -> (gain, centers, profile).
+    prog(ułamek 0..1) – postęp samej analizy."""
+    gain = centers = None
+    dbs, bands, rest = [], [], np.zeros(0, np.float32)
+    p1 = 0.5 if (level and denoise) else 1.0
+    for blk in _decode(src, cancel, lambda f: prog(f * p1), channel):
+        rest = np.concatenate([rest, blk])
+        m = len(rest) // FRAME * FRAME
+        if m:
+            fr = rest[:m].reshape(-1, FRAME)
+            dbs.append(10 * np.log10(np.mean(fr * fr, axis=1) + 1e-14))
+            if denoise:
+                bands.append(_band_psd(fr))
+            rest = rest[m:]
+    db = np.concatenate(dbs) if dbs else np.zeros(0)
+    active, floor = _activity(db) if len(db) else (np.zeros(0, bool), None)
+    profile = _noise_profile(np.concatenate(bands), active) if (denoise and bands) else None
+    if level and len(db):
+        if profile is not None:
+            # ── poziom mowy PO odszumieniu ──
+            d2, rest, dbs2 = _Denoiser(*profile), np.zeros(0, np.float32), []
+
+            def measure(y):
+                nonlocal rest
+                rest = np.concatenate([rest, y])
+                m = len(rest) // FRAME * FRAME
+                if m:
+                    fr = rest[:m].reshape(-1, FRAME)
+                    dbs2.append(10 * np.log10(np.mean(fr * fr, axis=1) + 1e-14))
+                    rest = rest[m:]
+            for blk in _decode(src, cancel, lambda f: prog(0.5 + f * 0.5), channel):
+                measure(d2.process(blk))
+            measure(d2.process(np.zeros(0, np.float32), final=True))
+            db2 = np.concatenate(dbs2) if dbs2 else db
+            n = min(len(db2), len(active))
+            # GDZIE jest mowa – z oryginału (pewne), JAK głośna – po odszumieniu
+            gain = _gain_curve(db2[:n], active[:n], None, top=MAX_GAIN_NR)
+        else:
+            gain = _gain_curve(db, active)
+        centers = np.arange(len(gain)) * FRAME + FRAME / 2
+    return gain, centers, profile
+
+
+def convert_to_opus(src, dst=None, bitrate=32000, progress=None, cancel=None, level=False, denoise=False,
+                    source="konwersja", split_channels=False):
     """
-    Konwertuje src -> dst (.opus).
+    Konwertuje src -> dst (.opus, mono).
     level=True   – wyrównanie głośności (okno 0,8 s, z podglądem do przodu),
     denoise=True – redukcja szumu tła (filtr <80 Hz + bramka widmowa, maks. -15 dB).
-    Przebiegi: 1) analiza poziomu i szumu, [2) przy obu opcjach: odszumienie i pomiar samej mowy],
-    ostatni) zapis. Odszumianie jest deterministyczne, więc przebieg 2 i zapis dają ten sam sygnał.
+    split_channels=True i plik stereo (nagranie: lewy = mikrofon, prawy = rozmówcy) – każdy kanał
+    analizowany i obrabiany osobno (własny profil szumu, własne wyrównanie), potem miks do mono.
+    Przebiegi: analiza poziomu i szumu [+ pomiar mowy po odszumieniu] dla każdego sygnału, na końcu zapis.
+    Odszumianie jest deterministyczne, więc pomiar i zapis dają ten sam sygnał.
     progress(ułamek 0..1), cancel() -> True przerywa. Przy błędzie usuwa niepełny plik.
+    Wykonane kroki (razem z wcześniejszymi ze znacznika źródła) zapisuje w znaczniku pliku wynikowego.
     """
     src = Path(src)
     dst = Path(dst) if dst else src.with_suffix(".opus")
@@ -201,67 +294,49 @@ def convert_to_opus(src, dst=None, bitrate=32000, progress=None, cancel=None, le
     tmp = dst.with_name(dst.name + ".part")
     prog = progress or (lambda f: None)
     two_pass = level or denoise
+    split = split_channels and channel_count(src) == 2
+    chans = [0, 1] if split else [None]
 
-    gain = centers = den = None
-    if two_pass:
-        # ── przebieg 1: poziom (i widmo w pasmach) każdej ramki 20 ms ──
-        dbs, bands, rest = [], [], np.zeros(0, np.float32)
-        p1 = 0.3 if (level and denoise) else 0.4
-        for blk in _decode_mono(src, cancel, lambda f: prog(f * p1)):
-            rest = np.concatenate([rest, blk])
-            m = len(rest) // FRAME * FRAME
-            if m:
-                fr = rest[:m].reshape(-1, FRAME)
-                dbs.append(10 * np.log10(np.mean(fr * fr, axis=1) + 1e-14))
-                if denoise:
-                    bands.append(_band_psd(fr))
-                rest = rest[m:]
-        db = np.concatenate(dbs) if dbs else np.zeros(0)
-        active, floor = _activity(db) if len(db) else (np.zeros(0, bool), None)
-        profile = _noise_profile(np.concatenate(bands), active) if (denoise and bands) else None
-        if level and len(db):
-            if profile is not None:
-                # ── przebieg 2: poziom mowy PO odszumieniu ──
-                d2, rest, dbs2 = _Denoiser(*profile), np.zeros(0, np.float32), []
+    # ── analiza (0–60% postępu przy obróbce) ──
+    plans = []
+    for k, ch in enumerate(chans):
+        if two_pass:
+            lo, hi = 0.6 * k / len(chans), 0.6 * (k + 1) / len(chans)
+            g, c, prof = _analyze(src, level, denoise, cancel, lambda f, lo=lo, hi=hi: prog(lo + f * (hi - lo)), ch)
+            plans.append({"gain": g, "centers": c, "den": _Denoiser(*prof) if prof is not None else None, "pos": 0})
+        else:
+            plans.append({"gain": None, "centers": None, "den": None, "pos": 0})
 
-                def measure(y):
-                    nonlocal rest
-                    rest = np.concatenate([rest, y])
-                    m = len(rest) // FRAME * FRAME
-                    if m:
-                        fr = rest[:m].reshape(-1, FRAME)
-                        dbs2.append(10 * np.log10(np.mean(fr * fr, axis=1) + 1e-14))
-                        rest = rest[m:]
-                for blk in _decode_mono(src, cancel, lambda f: prog(0.3 + f * 0.3)):
-                    measure(d2.process(blk))
-                measure(d2.process(np.zeros(0, np.float32), final=True))
-                db2 = np.concatenate(dbs2) if dbs2 else db
-                n = min(len(db2), len(active))
-                # GDZIE jest mowa – z oryginału (pewne), JAK głośna – po odszumieniu
-                gain = _gain_curve(db2[:n], active[:n], None, top=MAX_GAIN_NR)
-            else:
-                gain = _gain_curve(db, active)
-            centers = np.arange(len(gain)) * FRAME + FRAME / 2
-        if profile is not None:
-            den = _Denoiser(*profile)
-
-    # ── przebieg 2 (albo jedyny): zapis ──
+    # ── zapis ──
     out = None
     try:
         out = av.open(str(tmp), "w", format="ogg")
         st = out.add_stream("libopus", rate=RATE, layout="mono")
         st.bit_rate = bitrate
+        prev = read_processing(src)
+        steps = (prev["steps"] if prev else set()) | {x for x, on in (("level", level), ("denoise", denoise)) if on}
+        if steps:
+            st.metadata[TAG_STEPS] = ",".join(sorted(steps))
+            st.metadata[TAG_WHEN] = (prev["when"] if prev and not (level or denoise)
+                                     else f"{datetime.now():%Y-%m-%d %H:%M}")
+            st.metadata[TAG_SOURCE] = prev["source"] if prev and not (level or denoise) else source
         pos = 0          # próbki zapisane
         total_in = 0     # próbki wczytane (wyjście przycinamy do tej długości)
+        pend = [np.zeros(0, np.float32) for _ in chans]   # wyjścia kanałów czekające na wspólną długość
 
-        def emit(y):
+        def shape(pl, y):
+            if pl["gain"] is not None and len(y):
+                g = np.interp(np.arange(pl["pos"], pl["pos"] + len(y)), pl["centers"], pl["gain"])
+                y = y * (10 ** (g / 20)).astype(np.float32)
+            pl["pos"] += len(y)
+            return y
+
+        def write(y):
             nonlocal pos
+            y = y[:max(0, total_in - pos)]
             if not len(y):
                 return
-            if gain is not None:
-                g = np.interp(np.arange(pos, pos + len(y)), centers, gain)
-                y = y * (10 ** (g / 20)).astype(np.float32)
-            if two_pass:
+            if two_pass or split:
                 y = _soft_clip(y)
             fr = av.AudioFrame.from_ndarray(
                 (np.clip(y, -1, 1) * 32767).astype(np.int16).reshape(1, -1), format="s16", layout="mono")
@@ -271,12 +346,24 @@ def convert_to_opus(src, dst=None, bitrate=32000, progress=None, cancel=None, le
             for pkt in st.encode(fr):
                 out.mux(pkt)
 
-        p0, pw = ((0.6, 0.4) if (level and denoise) else (0.4, 0.6)) if two_pass else (0.0, 1.0)
-        for blk in _decode_mono(src, cancel, lambda f: prog(p0 + f * pw)):
-            total_in += len(blk)
-            emit(den.process(blk) if den else blk)
-        if den:
-            emit(den.process(np.zeros(0, np.float32), final=True)[:max(0, total_in - pos)])
+        def feed(ys):
+            for k, y in enumerate(ys):
+                pend[k] = np.concatenate([pend[k], shape(plans[k], y)])
+            n = min(len(x) for x in pend)
+            if n:
+                mix = pend[0][:n] if len(pend) == 1 else pend[0][:n] + pend[1][:n]
+                for k in range(len(pend)):
+                    pend[k] = pend[k][n:]
+                write(mix)
+
+        p0, pw = (0.6, 0.4) if two_pass else (0.0, 1.0)
+        for blk in _decode(src, cancel, lambda f: prog(p0 + f * pw), "both" if split else None):
+            sigs = [blk[0], blk[1]] if split else [blk]
+            total_in += len(sigs[0])
+            feed([pl["den"].process(x) if pl["den"] else x for pl, x in zip(plans, sigs)])
+        if any(pl["den"] for pl in plans):
+            z = np.zeros(0, np.float32)
+            feed([pl["den"].process(z, final=True) if pl["den"] else z for pl in plans])
         for pkt in st.encode(None):
             out.mux(pkt)
         out.close()

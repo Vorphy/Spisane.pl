@@ -41,11 +41,13 @@ def resolve_cores(cores, recording=None):
 
 
 def convert(src, dst=None, bitrate=32000, level=False, denoise=False, cores="auto",
-            recording=None, on_cores=None, progress=None, cancel=None):
+            recording=None, on_cores=None, progress=None, cancel=None, source="konwersja",
+            split_channels=False):
     src = Path(src)
     dst = Path(dst) if dst else src.with_suffix(".opus")
     args = {"src": str(src), "dst": str(dst), "bitrate": bitrate,
-            "level": bool(level), "denoise": bool(denoise)}
+            "level": bool(level), "denoise": bool(denoise), "source": source,
+            "split_channels": bool(split_channels)}
     flags = 0
     if os.name == "nt":
         flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS

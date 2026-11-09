@@ -29,11 +29,22 @@ Wszystkie opcje są w zakładce Transkrypcja → **⚙ Opcje**. Transkrypcja dzi
 o niskim priorytecie, więc okno i nagrywanie nie zwalniają, a pamięć po modelu zwalnia się po kolejce.
 Pierwsza transkrypcja pobiera model (ok. 1–3 GB).
 
+## Nagrywanie
+
+Mikrofon i dźwięk z głośników (rozmówcy) są nagrywane do **dwóch osobnych kanałów**. Po zakończeniu nagrania
+każdy kanał jest obrabiany oddzielnie: ma własny profil szumu i własne wyrównanie głośności. Potem oba
+łączą się w jeden plik Opus mono, który zastępuje surowy. Dzięki temu cichy rozmówca nie ginie pod głośnym,
+także gdy mówicie jednocześnie. Szum z Twojego mikrofonu jest usuwany niezależnie od dźwięku rozmówców.
+Obróbkę (wyrównanie, szum) i zachowanie surowego nagrania ustawiasz w Nagrywanie → **⚙ Opcje**.
+
+Obrobione pliki mają w metadanych znacznik (co zrobiono i kiedy). Transkrypcja i konwersja wyłączają wtedy
+dla tego pliku kroki, które już były, i pokazują to w jego wierszu. Dzięki temu nic nie jest obrabiane dwa razy.
+
 ## Ustawienia
 
 - **⚙ na samej górze**: ustawienia całej aplikacji (wygląd).
 - **⚙ Opcje w każdej zakładce**: ustawienia danego tematu. Pod listą widać ich podsumowanie, a kliknięcie je otwiera.
-  - Nagrywanie: folder nagrań, jakość (24/32/48 kbps), wyrównywanie głośności.
+  - Nagrywanie: folder nagrań, jakość (24/32/48 kbps), obróbka po nagraniu, zachowanie surowego nagrania.
   - Transkrypcja: model, urządzenie, rdzenie, format, monitor folderu.
   - Konwersja: wszystko poniżej.
 
