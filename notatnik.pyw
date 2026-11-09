@@ -217,17 +217,17 @@ class FileRow(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
 
         nm = self.path.name
-        if len(nm) > 28:                       # wąskie okno – zostaw początek (data) i koniec (rozszerzenie)
-            nm = nm[:19] + "…" + nm[-8:]
+        if len(nm) > 24:                       # wąskie okno – zostaw początek (data) i koniec (rozszerzenie)
+            nm = nm[:18] + "…" + nm[-5:]
         self.name = ctk.CTkLabel(self, text=nm, anchor="w",
-                                 font=ctk.CTkFont(size=13, weight="bold"))
+                                 font=ctk.CTkFont(size=11, weight="bold"))
         self.name.grid(row=0, column=0, sticky="ew", padx=(12, 6), pady=(8, 0))
         self.detail = ctk.CTkLabel(self, text=str(self.path.parent), anchor="w",
                                    text_color=MUTED, font=ctk.CTkFont(size=11))
         self.detail.grid(row=1, column=0, sticky="ew", padx=(12, 6))
 
         self.status_lbl = ctk.CTkLabel(self, text="czeka", text_color=MUTED,
-                                       font=ctk.CTkFont(size=12, weight="bold"), width=70, anchor="e")
+                                       font=ctk.CTkFont(size=11, weight="bold"), width=56, anchor="e")
         self.status_lbl.grid(row=0, column=1, sticky="e", padx=4, pady=(8, 0))
 
         self.action = ctk.CTkButton(self, text="✕", width=28, height=28, corner_radius=8,
@@ -277,17 +277,17 @@ class FileQueue(ctk.CTkFrame):
         self.grid_rowconfigure(1, weight=1)
 
         bar = self.toolbar = ctk.CTkFrame(self, fg_color="transparent")
-        bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ctk.CTkButton(bar, text="＋ Pliki", width=72, command=self.add_files).pack(side="left")
-        ctk.CTkButton(bar, text="＋ Folder", width=80, command=self.add_folder).pack(side="left", padx=4)
-        ctk.CTkButton(bar, text="Wyczyść", width=70, fg_color="transparent", border_width=1,
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ctk.CTkButton(bar, text="＋ Pliki", width=62, height=26, command=self.add_files).pack(side="left")
+        ctk.CTkButton(bar, text="＋ Folder", width=70, height=26, command=self.add_folder).pack(side="left", padx=4)
+        ctk.CTkButton(bar, text="Wyczyść", width=60, height=26, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray80"),
                       hover_color=CARD, command=self.clear_done).pack(side="left")
 
         self.list = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.list.grid(row=1, column=0, sticky="nsew")
         self.list.grid_columnconfigure(0, weight=1)
-        self.empty = ctk.CTkLabel(self.list, text=empty_text, text_color=MUTED, justify="center", wraplength=320)
+        self.empty = ctk.CTkLabel(self.list, text=empty_text, text_color=MUTED, justify="center", wraplength=250)
         self.empty.grid(row=0, column=0, pady=40)
 
     # do nadpisania
@@ -387,11 +387,11 @@ class TranscribeTab(FileQueue):
         self.ignored = set()               # pliki usunięte z listy w trakcie monitorowania
         self._last_watch = 0.0
 
-        ctk.CTkButton(self.toolbar, text="⚙ Opcje", width=74, fg_color="transparent", border_width=1,
+        ctk.CTkButton(self.toolbar, text="⚙", width=30, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray80"), hover_color=CARD,
                       command=lambda: TranscribeOptions(self.app, self)).pack(side="right")
         self.summary = ctk.CTkLabel(self, text="", anchor="w", text_color=MUTED, font=ctk.CTkFont(size=11),
-                                    cursor="hand2", wraplength=380, justify="left")
+                                    cursor="hand2", wraplength=270, justify="left")
         self.summary.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         self.summary.bind("<Button-1>", lambda e: TranscribeOptions(self.app, self))
         self.update_summary()
@@ -399,29 +399,15 @@ class TranscribeTab(FileQueue):
         foot = ctk.CTkFrame(self, fg_color="transparent")
         foot.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         foot.grid_columnconfigure(0, weight=1)
-        self.live = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED,
-                                 font=ctk.CTkFont(size=12, slant="italic"))
+        self.live = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED, wraplength=280, justify="left",
+                                 font=ctk.CTkFont(size=11, slant="italic"))
         self.live.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.watch_sw = ctk.CTkSwitch(foot, text="", command=self._watch_changed)
-        self.watch_sw.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.watch_sw.grid(row=1, column=0, sticky="w", pady=(4, 0))
         self._watch_label()
-        self.pause_sw = ctk.CTkSwitch(foot, text="Czekaj, gdy trwa nagrywanie",
-                                      command=self._pause_changed)
-        if app.cfg["pause_while_recording"]:
-            self.pause_sw.select()
-        self.pause_sw.grid(row=2, column=0, sticky="w", pady=(6, 0))
-        self.level_sw = ctk.CTkSwitch(foot, text="Wyrównaj głośność",
-                                      command=self._level_changed)
-        if app.cfg["level_transcribe"]:
-            self.level_sw.select()
-        self.level_sw.grid(row=3, column=0, sticky="w", pady=(6, 0))
-        self.nr_sw = ctk.CTkSwitch(foot, text="Usuń szum tła", command=self._level_changed)
-        if app.cfg["denoise_transcribe"]:
-            self.nr_sw.select()
-        self.nr_sw.grid(row=4, column=0, sticky="w", pady=(6, 0))
-        self.btn = ctk.CTkButton(foot, text="▶  Transkrybuj", width=124, height=34,
-                                 font=ctk.CTkFont(size=14, weight="bold"), command=self.toggle)
-        self.btn.grid(row=1, column=1, rowspan=4, sticky="e", pady=(6, 0))
+        self.btn = ctk.CTkButton(foot, text="▶  Transkrybuj", width=112, height=30,
+                                 font=ctk.CTkFont(size=13, weight="bold"), command=self.toggle)
+        self.btn.grid(row=1, column=1, sticky="e", pady=(4, 0))
 
     # ── opcje ──
     @property
@@ -437,14 +423,15 @@ class TranscribeTab(FileQueue):
             parts.append(f"beam {o['beam_size']}")
         if not o["vad"]:
             parts.append("bez VAD")
+        c = self.app.cfg
+        fx = [x for x, on in (("wyrównanie", c["level_transcribe"]), ("bez szumu", c["denoise_transcribe"])) if on]
+        if fx:
+            parts.append(" + ".join(fx))
         self.summary.configure(text="⚙  " + "  ·  ".join(parts))
 
     def _watch_label(self):
-        d = Path(self.app.cfg["watch_dir"])
-        name = d.name or str(d)
-        if len(name) > 14:                     # obok jest przycisk – długa nazwa by się ucięła
-            name = name[:13] + "…"
-        self.watch_sw.configure(text=f"Monitoruj „{name}”")   # co robi – widać w linii nad nim
+        # wąskie okno – bez nazwy folderu (jest w Opcjach i w linii nad przełącznikiem, gdy monitor działa)
+        self.watch_sw.configure(text="Monitoruj folder")   # co robi – widać w linii nad nim
 
     def _watch_changed(self):
         self.watching = bool(self.watch_sw.get())
@@ -466,15 +453,6 @@ class TranscribeTab(FileQueue):
             self._idle()
             self.live.configure(text="Monitor folderu wyłączony.")
 
-    def _level_changed(self):
-        self.app.cfg["level_transcribe"] = bool(self.level_sw.get())
-        self.app.cfg["denoise_transcribe"] = bool(self.nr_sw.get())
-        save_config(self.app.cfg)
-
-    def _pause_changed(self):
-        self.app.cfg["pause_while_recording"] = bool(self.pause_sw.get())
-        save_config(self.app.cfg)
-
     def filetypes(self):
         return [("Nagrania", " ".join("*" + e for e in sorted(transcriber.AUDIO_EXTENSIONS))),
                 ("Wszystkie pliki", "*.*")]
@@ -485,8 +463,8 @@ class TranscribeTab(FileQueue):
 
     def on_added(self, row):
         if not hasattr(row, "limit"):
-            row.limit = ctk.CTkEntry(row, width=96, height=24, font=ctk.CTkFont(size=11),
-                                     placeholder_text="✂ przytnij do…")
+            row.limit = ctk.CTkEntry(row, width=78, height=22, font=ctk.CTkFont(size=11),
+                                     placeholder_text="✂ przytnij")
             row.limit.grid(row=1, column=1, sticky="e", padx=4)
             row.limit.bind("<FocusOut>", lambda e, r=row: self._check_limit(r))
             row.limit.bind("<Return>", lambda e, r=row: self._check_limit(r))
@@ -956,6 +934,23 @@ class TranscribeOptions(ctk.CTkToplevel):
             self.vad.select()
         self._place("VAD", self.vad)
 
+        # ── przygotowanie dźwięku i nagrywanie ──
+        self.level_sw = ctk.CTkSwitch(body, text="wyrównaj głośność")
+        if app.cfg["level_transcribe"]:
+            self.level_sw.select()
+        self._place("Przed transkrypcją", self.level_sw)
+        self.nr_sw = ctk.CTkSwitch(body, text="usuń szum tła")
+        if app.cfg["denoise_transcribe"]:
+            self.nr_sw.select()
+        self._place("", self.nr_sw,
+                    "na kopii pliku – oryginał zostaje bez zmian. Pliki już obrobione (np. nagrania z aplikacji) "
+                    "aplikacja rozpozna i nie obrobi drugi raz")
+        self.pause_sw = ctk.CTkSwitch(body, text="nie zaczynaj nowego pliku, gdy trwa nagrywanie")
+        if app.cfg["pause_while_recording"]:
+            self.pause_sw.select()
+        self._place("Podczas nagrywania", self.pause_sw,
+                    "rozpoczęty plik dokończy się normalnie; kolejne poczekają na koniec nagrania")
+
         # ── monitor ──
         self.watch_dir = ctk.StringVar(value=app.cfg["watch_dir"])
         wf = ctk.CTkFrame(body, fg_color="transparent")
@@ -1039,6 +1034,8 @@ class TranscribeOptions(ctk.CTkToplevel):
 
     def _defaults(self):
         self.app.cfg["tr_opts"] = dict(engine.DEFAULT_OPTIONS)
+        for k in ("level_transcribe", "denoise_transcribe", "pause_while_recording"):
+            self.app.cfg[k] = DEFAULTS[k]
         save_config(self.app.cfg)
         self.tab.update_summary()
         self.destroy()
@@ -1069,6 +1066,9 @@ class TranscribeOptions(ctk.CTkToplevel):
             "format": self.fmt.get(), "beam_size": beam, "timestamps": bool(self.ts.get()),
             "vad": bool(self.vad.get()), "limit_time": "",
         }
+        self.app.cfg["level_transcribe"] = bool(self.level_sw.get())
+        self.app.cfg["denoise_transcribe"] = bool(self.nr_sw.get())
+        self.app.cfg["pause_while_recording"] = bool(self.pause_sw.get())
         if self.watch_dir.get() != self.app.cfg["watch_dir"]:
             self.app.cfg["watch_dir"] = self.watch_dir.get()
             self.tab.ignored.clear()
@@ -1360,11 +1360,11 @@ class ConvertTab(FileQueue):
         self.trashed = 0          # oryginały w Koszu – miejsce wróci po opróżnieniu Kosza
         self.potential = 0        # do odzyskania po ręcznym usunięciu oryginałów
 
-        ctk.CTkButton(self.toolbar, text="⚙ Opcje", width=74, fg_color="transparent", border_width=1,
+        ctk.CTkButton(self.toolbar, text="⚙", width=30, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray80"), hover_color=CARD,
                       command=lambda: ConvertOptions(self.app)).pack(side="right")
         self.summary = ctk.CTkLabel(self, text="", anchor="w", text_color=MUTED, font=ctk.CTkFont(size=11),
-                                    cursor="hand2", wraplength=380, justify="left")
+                                    cursor="hand2", wraplength=270, justify="left")
         self.summary.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         self.summary.bind("<Button-1>", lambda e: ConvertOptions(self.app))
         self.update_summary()
@@ -1372,13 +1372,14 @@ class ConvertTab(FileQueue):
         foot = ctk.CTkFrame(self, fg_color="transparent")
         foot.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         foot.grid_columnconfigure(0, weight=1)
-        self.live = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED,
-                                 font=ctk.CTkFont(size=12, slant="italic"))
+        self.live = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED, wraplength=280, justify="left",
+                                 font=ctk.CTkFont(size=11, slant="italic"))
         self.live.grid(row=0, column=0, sticky="ew")
-        self.info = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED, wraplength=250, justify="left")
+        self.info = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED, wraplength=160, justify="left",
+                                 font=ctk.CTkFont(size=11))
         self.info.grid(row=1, column=0, sticky="ew")
-        self.btn = ctk.CTkButton(foot, text="▶  Konwertuj", width=124, height=34,
-                                 font=ctk.CTkFont(size=14, weight="bold"), command=self.toggle)
+        self.btn = ctk.CTkButton(foot, text="▶  Konwertuj", width=112, height=30,
+                                 font=ctk.CTkFont(size=13, weight="bold"), command=self.toggle)
         self.btn.grid(row=0, column=1, rowspan=2, sticky="e", pady=(6, 0))
 
     def update_summary(self):
@@ -1537,18 +1538,18 @@ class RecordTab(ctk.CTkFrame):
         # ── Licznik ──
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.grid(row=0, column=0, pady=(6, 0))
-        self.dot = ctk.CTkLabel(top, text="●", font=ctk.CTkFont(size=20), text_color=MUTED)
+        self.dot = ctk.CTkLabel(top, text="●", font=ctk.CTkFont(size=16), text_color=MUTED)
         self.dot.pack(side="left", padx=(0, 10))
-        self.timer = ctk.CTkLabel(top, text="00:00:00", font=ctk.CTkFont(family="Segoe UI", size=34, weight="bold"),
-                                  height=44)
+        self.timer = ctk.CTkLabel(top, text="00:00:00", font=ctk.CTkFont(family="Segoe UI", size=28, weight="bold"),
+                                  height=36)
         self.timer.pack(side="left")
-        self.state_lbl = ctk.CTkLabel(self, text="Gotowy do nagrywania", text_color=MUTED,
-                                      font=ctk.CTkFont(size=13))
+        self.state_lbl = ctk.CTkLabel(self, text="Gotowy do nagrywania", text_color=MUTED, height=20,
+                                      wraplength=280, font=ctk.CTkFont(size=12))
         self.state_lbl.grid(row=1, column=0)
 
         # ── Wskaźniki poziomu ──
         meters = ctk.CTkFrame(self, fg_color=CARD, border_color=CARD_BORDER, border_width=1, corner_radius=12)
-        meters.grid(row=2, column=0, sticky="ew", padx=8, pady=(8, 0))
+        meters.grid(row=2, column=0, sticky="ew", padx=4, pady=(6, 0))
         meters.grid_columnconfigure(1, weight=1)
         self.devs_in, self.devs_loop, def_in, def_loop = [], [], None, None
         try:
@@ -1565,61 +1566,62 @@ class RecordTab(ctk.CTkFrame):
                     return n
             return names[0] if names else "(brak urządzeń)"
 
-        ctk.CTkLabel(meters, text="🎙  Mikrofon", anchor="w", width=100).grid(
-            row=0, column=0, sticky="w", padx=(14, 6), pady=(8, 0))
+        ctk.CTkLabel(meters, text="🎙", anchor="w", width=20).grid(
+            row=0, column=0, sticky="w", padx=(10, 4), pady=(8, 0))
         self.mic_var = ctk.StringVar(value=pick(self.devs_in, app.cfg["mic_name"], def_in))
         self.mic_menu = ctk.CTkOptionMenu(meters, variable=self.mic_var, dynamic_resizing=False, height=26,
                                           values=[n for _, n in self.devs_in] or ["(brak urządzeń)"],
                                           command=lambda _: self._dev_changed())
-        self.mic_menu.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=(8, 0))
+        self.mic_menu.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(8, 0))
         self.mic_bar = ctk.CTkProgressBar(meters, height=6, progress_color=GREEN)
         self.mic_bar.set(0)
-        self.mic_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
+        self.mic_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(4, 6))
 
-        ctk.CTkLabel(meters, text="🔊  Rozmówcy", anchor="w", width=100).grid(
-            row=2, column=0, sticky="w", padx=(14, 6))
+        ctk.CTkLabel(meters, text="🔊", anchor="w", width=20).grid(
+            row=2, column=0, sticky="w", padx=(10, 4))
         self.loop_var = ctk.StringVar(value=pick(self.devs_loop, app.cfg["loop_name"], def_loop))
         self.loop_menu = ctk.CTkOptionMenu(meters, variable=self.loop_var, dynamic_resizing=False, height=26,
                                            values=[n for _, n in self.devs_loop] or ["(brak urządzeń)"],
                                            command=lambda _: self._dev_changed())
-        self.loop_menu.grid(row=2, column=1, sticky="ew", padx=(0, 14))
+        self.loop_menu.grid(row=2, column=1, sticky="ew", padx=(0, 10))
         self.loop_bar = ctk.CTkProgressBar(meters, height=6, progress_color=GREEN)
         self.loop_bar.set(0)
-        self.loop_bar.grid(row=3, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 2))
-        self.check_btn = ctk.CTkButton(meters, text="Sprawdź poziomy (10 s)", width=160, height=24,
+        self.loop_bar.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(4, 2))
+        self.check_btn = ctk.CTkButton(meters, text="Sprawdź poziomy (10 s)", width=140, height=22,
                                        fg_color="transparent", border_width=1, border_color=CARD_BORDER,
                                        text_color=("gray20", "gray85"), hover_color=CARD,
                                        command=self.start_monitor)
-        self.check_btn.grid(row=4, column=0, columnspan=2, pady=(2, 8))
+        self.check_btn.grid(row=4, column=0, columnspan=2, pady=(2, 6))
 
         # ── Przycisk ──
-        self.btn = ctk.CTkButton(self, text="●   Nagrywaj", width=210, height=40, corner_radius=20,
-                                 font=ctk.CTkFont(size=16, weight="bold"),
+        self.btn = ctk.CTkButton(self, text="●   Nagrywaj", width=180, height=36, corner_radius=18,
+                                 font=ctk.CTkFont(size=15, weight="bold"),
                                  fg_color=RED, hover_color=RED_HOVER, command=self.toggle)
-        self.btn.grid(row=3, column=0, pady=(10, 4))
+        self.btn.grid(row=3, column=0, pady=(8, 2))
 
         # ── Info o pliku ──
-        self.file_lbl = ctk.CTkLabel(self, text="", text_color=MUTED, font=ctk.CTkFont(size=12))
+        self.file_lbl = ctk.CTkLabel(self, text="", text_color=MUTED, height=18, wraplength=280,
+                                     font=ctk.CTkFont(size=11))
         self.file_lbl.grid(row=4, column=0)
         links = ctk.CTkFrame(self, fg_color="transparent")
         links.grid(row=5, column=0, pady=(2, 0))
         links.grid_remove()          # pusta ramka miałaby domyślne 200 px wysokości – pokaże się po nagraniu
-        self.to_tr = ctk.CTkButton(links, text="Dodaj do transkrypcji", width=160, height=30,
+        self.to_tr = ctk.CTkButton(links, text="Do transkrypcji", width=110, height=26,
                                    fg_color="transparent", border_width=1, border_color=CARD_BORDER,
                                    text_color=("gray20", "gray85"), hover_color=CARD, command=self._to_transcribe)
-        self.show = ctk.CTkButton(links, text="Pokaż w folderze", width=130, height=30,
+        self.show = ctk.CTkButton(links, text="Pokaż plik", width=80, height=26,
                                   fg_color="transparent", border_width=1, border_color=CARD_BORDER,
                                   text_color=("gray20", "gray85"), hover_color=CARD,
                                   command=lambda: reveal(self.last_file))
         self._links = links
 
         # ── Opcje ──
-        ctk.CTkButton(self, text="⚙ Opcje", width=74, fg_color="transparent", border_width=1,
+        ctk.CTkButton(self, text="⚙", width=30, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray80"), hover_color=CARD,
                       command=lambda: RecordOptions(self.app)).place(relx=1.0, x=-6, y=6, anchor="ne")
         self.grid_rowconfigure(6, weight=1)
         self.summary = ctk.CTkLabel(self, text="", anchor="w", text_color=MUTED, font=ctk.CTkFont(size=11),
-                                    cursor="hand2", wraplength=380, justify="left")
+                                    cursor="hand2", wraplength=270, justify="left")
         self.summary.grid(row=7, column=0, sticky="ew", padx=12, pady=(2, 2))
         self.summary.bind("<Button-1>", lambda e: RecordOptions(self.app))
         self.update_summary()
@@ -1745,7 +1747,7 @@ class RecordTab(ctk.CTkFrame):
             self.file_lbl.configure(text=f"{rec.path.name}   ·   {fmt_hms(rec.elapsed)}   ·   {fmt_size(rec.size)}")
             self.to_tr.pack(side="left", padx=4)
             self.show.pack(side="left", padx=4)
-            self.to_tr.configure(state="normal", text="Dodaj do transkrypcji")
+            self.to_tr.configure(state="normal", text="Do transkrypcji")
             self._links.grid()
             if not rec.error:
                 self._post_process(rec.path)       # zawsze: przynajmniej miks kanałów do mono
@@ -1895,8 +1897,8 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
         super().__init__(fg_color=BG)
         self.title(APP_NAME)
-        self.geometry("430x560")
-        self.minsize(400, 560)
+        self.geometry("320x420")
+        self.minsize(320, 420)
         if ICON_PATH.exists():
             try:
                 self.iconbitmap(str(ICON_PATH))
@@ -1905,18 +1907,18 @@ class App(ctk.CTk):
         self._ui_q = queue.Queue()
 
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=18, pady=(14, 0))
-        ctk.CTkLabel(header, text=APP_NAME, font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
-        ctk.CTkButton(header, text="⚙", width=30, height=30, corner_radius=15, font=ctk.CTkFont(size=15),
+        header.pack(fill="x", padx=12, pady=(4, 0))
+        ctk.CTkLabel(header, text=APP_NAME, height=22, font=ctk.CTkFont(size=12, weight="bold")).pack(side="left")
+        ctk.CTkButton(header, text="⚙", width=24, height=22, corner_radius=11, font=ctk.CTkFont(size=13),
                       fg_color="transparent", hover_color=CARD, text_color=MUTED,
                       command=lambda: SettingsWindow(self)).pack(side="right")
-        self.pin_btn = ctk.CTkButton(header, text="📌", width=30, height=30, corner_radius=15,
-                                     font=ctk.CTkFont(size=13), text_color=MUTED, command=self.toggle_on_top)
+        self.pin_btn = ctk.CTkButton(header, text="📌", width=24, height=22, corner_radius=11,
+                                     font=ctk.CTkFont(size=11), text_color=MUTED, command=self.toggle_on_top)
         self.pin_btn.pack(side="right", padx=(0, 4))
         self._apply_on_top()
 
-        self.tabs = ctk.CTkTabview(self, fg_color=BG, segmented_button_font=ctk.CTkFont(size=12, weight="bold"))
-        self.tabs.pack(fill="both", expand=True, padx=12, pady=(2, 12))
+        self.tabs = ctk.CTkTabview(self, fg_color=BG, segmented_button_font=ctk.CTkFont(size=11, weight="bold"))
+        self.tabs.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         for name in ("Nagrywanie", "Transkrypcja", "Konwersja"):
             self.tabs.add(name)
             self.tabs.tab(name).grid_columnconfigure(0, weight=1)
