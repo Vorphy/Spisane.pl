@@ -28,6 +28,7 @@ import customtkinter as ctk  # noqa: E402
 
 import recorder      # noqa: E402
 import converter     # noqa: E402
+import convproc      # noqa: E402
 import transcriber   # noqa: E402
 import engine        # noqa: E402
 
@@ -51,8 +52,12 @@ DEFAULTS = {
     "level_transcribe": True,
     "denoise_convert": True,
     "denoise_transcribe": True,
+    "convert_cores": "auto",     # auto / p / e / all – też przygotowanie dźwięku do transkrypcji
     "appearance": "system",
 }
+
+CONVERT_CORES = {"auto": "Automatycznie", "p": "P (wydajne)", "e": "E (energooszczędne)", "all": "Wszystkie"}
+CORE_NAMES = {"p": "P (wydajne)", "e": "E (energooszczędne)", "all": "wszystkie"}
 
 CONVERT_EXT = {".mp4", ".mkv", ".webm", ".mov", ".m4a", ".mp3", ".wav", ".flac", ".aac", ".wma", ".ogg"}
 
@@ -75,6 +80,9 @@ def log_exc(where):
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] {where}\n{traceback.format_exc()}")
+            detail = getattr(sys.exc_info()[1], "detail", "")
+            if detail:
+                f.write(f"--- ślad z procesu ---\n{detail}\n")
     except OSError:
         pass
 
@@ -542,16 +550,22 @@ class TranscribeTab(FileQueue):
         # wyrównanie głośności w tle, potem transkrypcja kopii
         self.preparing = row
         self.prep_cancel.clear()
-        self.live.configure(text=" i ".join(x for x, on in (("Wyrównuję głośność", level),
-                                                                 ("usuwam szum" if level else "Usuwam szum", denoise)) if on) + "…")
+        what = " i ".join(x for x, on in (("Wyrównuję głośność", level),
+                                          ("usuwam szum" if level else "Usuwam szum", denoise)) if on)
+        self.live.configure(text=what + "…")
         ui = self.app.ui
+
+        def on_cores(kind, desc):
+            ui(lambda: self.preparing is row and self.live.configure(
+                text=f"{what}…   ·   rdzenie {CORE_NAMES.get(kind, kind)}"))
 
         def work():
             try:
                 tmp.parent.mkdir(parents=True, exist_ok=True)
-                converter.convert_to_opus(row.path, tmp, bitrate=48000, level=level, denoise=denoise,
-                                          progress=lambda f: ui(lambda: row.set_progress(f)),
-                                          cancel=self.prep_cancel.is_set)
+                convproc.convert(row.path, tmp, bitrate=48000, level=level, denoise=denoise,
+                                 cores=self.app.cfg["convert_cores"], recording=self.app.rec_tab.is_recording,
+                                 on_cores=on_cores, progress=lambda f: ui(lambda: row.set_progress(f)),
+                                 cancel=self.prep_cancel.is_set)
                 ui(lambda: self._prepared(row, tmp, None))
             except InterruptedError:
                 ui(lambda: self._prepared(row, tmp, "stop"))
@@ -991,9 +1005,35 @@ class ConvertTab(FileQueue):
         if app.cfg["denoise_convert"]:
             self.nr_cb.select()
         self.nr_cb.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        cf = ctk.CTkFrame(foot, fg_color="transparent")
+        cf.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ctk.CTkLabel(cf, text="Rdzenie CPU:").pack(side="left", padx=(0, 8))
+        self.cores_sb = ctk.CTkSegmentedButton(cf, values=list(CONVERT_CORES.values()),
+                                               command=self._cores_changed)
+        self.cores_sb.set(CONVERT_CORES.get(app.cfg["convert_cores"], CONVERT_CORES["auto"]))
+        self.cores_sb.pack(side="left")
+        self.cores_hint = ctk.CTkLabel(foot, text="", anchor="w", text_color=MUTED, justify="left")
+        self.cores_hint.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        self._cores_hint()
         self.btn = ctk.CTkButton(foot, text="▶  Konwertuj", width=150, height=36,
                                  font=ctk.CTkFont(size=14, weight="bold"), command=self.toggle)
         self.btn.grid(row=1, column=1, rowspan=3, sticky="e", pady=(6, 0))
+
+    def _cores_changed(self, label):
+        self.app.cfg["convert_cores"] = {v: k for k, v in CONVERT_CORES.items()}[label]
+        save_config(self.app.cfg)
+        self._cores_hint()
+
+    def _cores_hint(self, now=None):
+        hint = {"auto": "E podczas nagrywania, P poza nim – przełącza się w trakcie pliku.",
+                "p": "Najszybciej (ok. 2× szybciej niż E), ale konkuruje z aplikacjami na pierwszym planie.",
+                "e": "Wolniej, za to rdzenie P zostają wolne dla Teams i innych aplikacji.",
+                "all": "Windows sam przydziela – konwersja i tak używa jednego wątku."
+                }.get(self.app.cfg["convert_cores"], "")
+        hint += "  Dotyczy też przygotowania dźwięku do transkrypcji."
+        if now:
+            hint = f"Teraz: rdzenie {now}.   " + hint
+        self.cores_hint.configure(text=hint)
 
     def _level_changed(self):
         self.app.cfg["level_convert"] = bool(self.level_cb.get())
@@ -1049,8 +1089,10 @@ class ConvertTab(FileQueue):
             ui(lambda r=row: (r.set_status("w toku"), r.action.configure(state="disabled")))
             try:
                 before = row.path.stat().st_size
-                dst = converter.convert_to_opus(
+                dst = convproc.convert(
                     row.path, bitrate=bitrate, level=level, denoise=denoise,
+                    cores=self.app.cfg["convert_cores"], recording=self.app.rec_tab.is_recording,
+                    on_cores=lambda k, d: ui(lambda: self._cores_hint(CORE_NAMES.get(k, k))),
                     progress=lambda f, r=row: ui(lambda: r.set_progress(f)),
                     cancel=self.cancel.is_set)
                 after = dst.stat().st_size
@@ -1081,6 +1123,7 @@ class ConvertTab(FileQueue):
 
     def _finished(self):
         self.running = False
+        self._cores_hint()
         self.btn.configure(text="▶  Konwertuj", state="normal",
                            fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"],
                            hover_color=ctk.ThemeManager.theme["CTkButton"]["hover_color"])

@@ -116,23 +116,31 @@ def detect_core_types():
         return all_cpus, []
 
 
-def apply_cores(cores):
-    """Przypina BIEŻĄCY proces do rdzeni: 'p', 'e', 'all' albo liczba N
-    (pierwsze N procesorów logicznych – najpierw P, potem E). Zwraca opis."""
+def cores_mask(cores):
+    """('p' | 'e' | 'all' | N) -> (maska bitowa albo None = wszystkie, opis)."""
     p, e = detect_core_types()
     all_cpus = sorted(p + e)
     if cores == "all":
-        return f"wszystkie ({len(all_cpus)} CPU)"
+        return None, f"wszystkie ({len(all_cpus)} CPU)"
     if cores == "p":
         selected, label = p, "tylko P (wydajne)"
     elif cores == "e":
         if not e:
-            return "wszystkie (procesor nie ma rdzeni E)"
+            return None, "wszystkie (procesor nie ma rdzeni E)"
         selected, label = e, "tylko E (energooszczędne)"
     else:
         n = max(1, min(int(cores), len(all_cpus)))
         selected, label = (p + e)[:n], f"pierwsze {n} CPU"
-    mask = sum(1 << c for c in selected)
+    return sum(1 << c for c in selected), f"{label}: CPU {','.join(map(str, selected))}"
+
+
+def set_affinity(cores, handle=None):
+    """Przypina proces (domyślnie BIEŻĄCY; albo uchwyt innego procesu) do rdzeni:
+    'p', 'e', 'all' albo liczba N (pierwsze N procesorów logicznych – najpierw P, potem E).
+    Działa też na już pracującym procesie. Zwraca opis."""
+    mask, desc = cores_mask(cores)
+    if mask is None:
+        mask = sum(1 << c for c in range(os.cpu_count() or 1))
     try:
         import ctypes
         from ctypes import wintypes
@@ -140,11 +148,19 @@ def apply_cores(cores):
         k32.GetCurrentProcess.restype = wintypes.HANDLE
         k32.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
         k32.SetProcessAffinityMask.restype = wintypes.BOOL
-        if not k32.SetProcessAffinityMask(k32.GetCurrentProcess(), mask):
+        h = k32.GetCurrentProcess() if handle is None else int(handle)
+        if not k32.SetProcessAffinityMask(h, mask):
             raise OSError("SetProcessAffinityMask nie powiodło się")
     except Exception as ex:
         return f"wszystkie (nie udało się przypiąć: {ex})"
-    return f"{label}: CPU {','.join(map(str, selected))}"
+    return desc
+
+
+def apply_cores(cores):
+    """Przypina BIEŻĄCY proces do rdzeni (zob. set_affinity). Zwraca opis."""
+    if cores == "all":
+        return cores_mask("all")[1]
+    return set_affinity(cores)
 
 
 def core_summary():

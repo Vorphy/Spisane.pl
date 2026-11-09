@@ -29,6 +29,18 @@ Wszystkie opcje są w zakładce Transkrypcja → **⚙ Opcje**. Transkrypcja dzi
 o niskim priorytecie, więc okno i nagrywanie nie zwalniają, a pamięć po modelu zwalnia się po kolejce.
 Pierwsza transkrypcja pobiera model (ok. 1–3 GB).
 
+## Konwersja
+
+Zamienia nagrania (np. MP4 z OBS) na małe pliki Opus, opcjonalnie z wyrównaniem głośności
+i usunięciem szumu. Działa w osobnym procesie o niskim priorytecie. **Rdzenie CPU** wybierasz w zakładce:
+
+- **Automatycznie** (domyślnie): rdzenie E podczas nagrywania, P poza nim. Przełącza się w trakcie pliku,
+  gdy zaczniesz albo skończysz nagrywać.
+- **P**, **E** albo **Wszystkie** na stałe.
+
+Konwersja używa jednego wątku. Na i5-1345U nagranie 41 min z wyrównaniem i odszumianiem trwało ok. 1,5 min na P
+i ok. 3 min na E. „Wszystkie” nie przyspiesza. To samo ustawienie dotyczy przygotowania dźwięku przed transkrypcją.
+
 ## Prywatność
 
 Nagrania, transkrypcje, `config.json` i logi są w `.gitignore` i nie trafiają do repo.
