@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import tkinter
 import traceback
 from ctypes import wintypes
 from datetime import datetime
@@ -26,6 +27,14 @@ sys.path.insert(0, str(APP_DIR))
 
 import deps          # noqa: E402  – brakujące pakiety (nowy komputer): zapytaj i doinstaluj
 deps.ensure()
+
+# Per-Monitor v2: Windows skaluje pasek tytułu i ramki osobno dla każdego monitora (w trybie, który
+# włącza CustomTkinter, pasek ma zawsze rozmiar monitora głównego – na monitorze 100% był za duży).
+# Musi być ustawione przed utworzeniem pierwszego okna; późniejsze wywołanie w CustomTkinter nic już nie zmienia.
+try:
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:
+    pass
 
 import customtkinter as ctk  # noqa: E402
 from customtkinter.windows.widgets.scaling.scaling_tracker import ScalingTracker  # noqa: E402
@@ -89,6 +98,10 @@ def _center_monitor(window):
     return _monitor_at((left + right) / 2, (top + bottom) / 2)
 
 
+def _mouse_down():
+    return bool(_u32.GetAsyncKeyState(0x01) & 0x8000)
+
+
 _orig_dpi = ScalingTracker.get_window_dpi_scaling
 _orig_update = ScalingTracker.update_scaling_callbacks_for_window
 
@@ -101,7 +114,7 @@ def _dpi_scaling(cls, window):
                 return _monitor_scale(_monitor_at(*_ROOT_POS))
             if master is not None and master.winfo_exists() and master.winfo_toplevel().winfo_viewable():
                 return _monitor_scale(_center_monitor(master.winfo_toplevel()))
-        if _u32.GetAsyncKeyState(0x01) & 0x8000 and window in cls.window_dpi_scaling_dict:
+        if _mouse_down() and window in cls.window_dpi_scaling_dict:
             return cls.window_dpi_scaling_dict[window]       # przeciąganie – przeskaluj po upuszczeniu
         return _monitor_scale(_center_monitor(window))
     except Exception:
@@ -123,14 +136,94 @@ def _fit_on_monitor(window):
         pass
 
 
-def _update_and_fit(cls, window):
-    _orig_update(window)
+def _tk_nc_error(window):
+    """O ile (dx, dy) Tk myli się co do grubości paska tytułu i ramek okna na jego obecnym monitorze.
+    Tk liczy je ze skali monitora GŁÓWNEGO (AdjustWindowRectEx), a w trybie Per-Monitor v2 Windows rysuje
+    je w skali monitora, na którym jest okno. Na monitorze głównym błąd = (0, 0)."""
+    hwnd = _frame_hwnd(window)
+    left, top, right, bottom = _window_rect(window)
+    cr = wintypes.RECT()
+    _u32.GetClientRect(hwnd, ctypes.byref(cr))
+    tk_nc = wintypes.RECT(0, 0, 0, 0)
+    _u32.AdjustWindowRectEx(ctypes.byref(tk_nc), _u32.GetWindowLongW(hwnd, -16), False, _u32.GetWindowLongW(hwnd, -20))
+    return ((right - left - cr.right) - (tk_nc.right - tk_nc.left),
+            (bottom - top - cr.bottom) - (tk_nc.bottom - tk_nc.top)), (cr.right, cr.bottom)
+
+
+def _fix_client_size(window, w0=None, h0=None):
+    """Ustaw wnętrze okna dokładnie na rozmiar logiczny × skala, z poprawką na błąd Tk (zob. _tk_nc_error);
+    tak samo minimum/maksimum – inaczej okno na monitorze o innej skali było za duże i rosło przy przejściach."""
     try:
-        window.after(50, lambda: _fit_on_monitor(window))
+        if not window.winfo_exists() or not window.winfo_viewable():
+            return
+        w0 = w0 or window._current_width
+        h0 = h0 or window._current_height
+        s = ScalingTracker.get_window_scaling(window)
+        (dx, dy), client = _tk_nc_error(window)
+        want = (round(w0 * s), round(h0 * s))
+        mn_w, mn_h = getattr(window, "_min_width", 0) or 0, getattr(window, "_min_height", 0) or 0
+        tkinter.Wm.wm_minsize(window, max(1, round(mn_w * s) + dx), max(1, round(mn_h * s) + dy))
+        mx_w, mx_h = getattr(window, "_max_width", None), getattr(window, "_max_height", None)
+        if mx_w and mx_h and mx_w < 100000:
+            tkinter.Wm.wm_maxsize(window, round(mx_w * s) + dx, round(mx_h * s) + dy)
+        # rozmiar: Tk myli się tu inaczej niż przy min/max – ustaw, zmierz faktyczne wnętrze, popraw o różnicę
+        gw, gh = want
+        for _ in range(3):
+            if client == want:
+                break
+            gw, gh = gw + want[0] - client[0], gh + want[1] - client[1]
+            tkinter.Wm.wm_geometry(window, f"{gw}x{gh}")
+            window.update_idletasks()
+            cr = wintypes.RECT()
+            _u32.GetClientRect(_frame_hwnd(window), ctypes.byref(cr))
+            client = (cr.right, cr.bottom)
+        window._current_width, window._current_height = w0, h0
     except Exception:
         pass
 
 
+def _update_and_fit(cls, window):
+    # przez chwilę po zmianie skali zdarzenia <Configure> niosą jeszcze STARY rozmiar fizyczny –
+    # CustomTkinter przeliczyłby go nową skalą i „zapamiętał” złe wymiary (okno rosło po każdym przejściu)
+    w0, h0 = getattr(window, "_current_width", None), getattr(window, "_current_height", None)
+    window._dims_frozen_until = time.monotonic() + 1.6
+    _orig_update(window)
+
+    try:
+        window.after(100, lambda: _fix_client_size(window, w0, h0))
+        window.after(1100, lambda: _fix_client_size(window, w0, h0))   # po zdjęciu blokady min/max (1000 ms)
+        window.after(150, lambda: _fit_on_monitor(window))
+        window.after(1200, lambda: _fit_on_monitor(window))
+    except Exception:
+        pass
+
+
+def _patch_dimensions(cls):
+    """Błędy CustomTkinter: block_update_dimensions_event() ustawiał False (blokada nie działała),
+    a zdarzenia rozmiaru tuż po zmianie skali psuły zapamiętane wymiary okna."""
+    orig = cls._update_dimensions_event
+
+    def update_dimensions(self, event=None):
+        if time.monotonic() < getattr(self, "_dims_frozen_until", 0):
+            return
+        try:
+            # okno jest już na monitorze o innej skali, a CustomTkinter jeszcze nie przeskalował (do 100 ms,
+            # albo dłużej – przeciąganie): rozmiar fizyczny przeliczony starą skalą byłby błędny
+            if abs(_monitor_scale(_center_monitor(self)) - ScalingTracker.window_dpi_scaling_dict.get(self, 0)) > 0.01:
+                return
+        except Exception:
+            pass
+        orig(self, event)
+
+    def block(self):
+        self._block_update_dimensions_event = True
+
+    cls._update_dimensions_event = update_dimensions
+    cls.block_update_dimensions_event = block
+
+
+_patch_dimensions(ctk.CTk)
+_patch_dimensions(ctk.CTkToplevel)
 ScalingTracker.get_window_dpi_scaling = classmethod(_dpi_scaling)
 ScalingTracker.update_scaling_callbacks_for_window = classmethod(_update_and_fit)
 
@@ -163,6 +256,7 @@ def _reveal_dialog(win, parent):
     y = int(min(max(pt + 30, T), max(T, B - h)))
     win.geometry(f"+{x}+{y}")
     win.deiconify()
+    win.after(30, lambda: _fix_client_size(win))
     win.lift()
     win.focus_force()
     try:
@@ -2085,7 +2179,8 @@ class App(ctk.CTk):
         global _ROOT_POS
         self.deiconify()
         _ROOT_POS = None
-        self.after(50, lambda: _fit_on_monitor(self))
+        self.after(30, lambda: _fix_client_size(self, 320, 420) if self._current_width <= 330 else _fix_client_size(self))
+        self.after(80, lambda: _fit_on_monitor(self))
 
     def toggle_on_top(self):
         self.cfg["always_on_top"] = not self.cfg["always_on_top"]
