@@ -6,6 +6,7 @@ konwersja starych nagrań do Opus i kolejka transkrypcji Whisperem
 Uruchomienie: pythonw notatnik.pyw   (albo skrót „Notatnik spotkań”)
 """
 
+import ctypes
 import json
 import os
 import queue
@@ -15,6 +16,7 @@ import sys
 import threading
 import time
 import traceback
+from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -26,6 +28,147 @@ import deps          # noqa: E402  – brakujące pakiety (nowy komputer): zapyt
 deps.ensure()
 
 import customtkinter as ctk  # noqa: E402
+from customtkinter.windows.widgets.scaling.scaling_tracker import ScalingTracker  # noqa: E402
+
+
+# ── Skalowanie między monitorami (np. laptop 150% + monitory 100%) ─────────────────────────
+# CustomTkinter co 100 ms sprawdza, na którym monitorze jest okno, i je przeskalowuje. Domyślnie:
+# - robi to już w trakcie przeciągania (okno „pływa” duże/małe i miga półprzezroczystością),
+# - liczy monitor dla całego okna, więc na granicy monitorów potrafi skakać tam i z powrotem,
+# - nowe okno dostaje skalę monitora, na którym Windows je najpierw postawi, a potem skacze.
+# Poprawki: skala według ŚRODKA okna; przy wciśniętym lewym przycisku myszy (przeciąganie) bez
+# zmian – przeskalowanie raz, po upuszczeniu; po przeskalowaniu okno wsuwane w całości na monitor;
+# niewidoczne jeszcze okno dostaje skalę monitora okna-rodzica albo zapamiętanej pozycji.
+_u32 = ctypes.windll.user32
+_u32.GetParent.restype = wintypes.HWND
+_u32.GetParent.argtypes = [wintypes.HWND]
+_u32.MonitorFromPoint.restype = wintypes.HMONITOR
+_u32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+_u32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+_u32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                              ctypes.c_int, ctypes.c_int, wintypes.UINT]
+_ROOT_POS = None          # (x, y) – zapamiętana pozycja okna aplikacji, zanim się pokaże
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+
+def _frame_hwnd(window):
+    h = wintypes.HWND(window.winfo_id())
+    return _u32.GetParent(h) or h
+
+
+def _monitor_at(x, y, default=2):          # 2 = najbliższy, 0 = żaden (None poza ekranami)
+    return _u32.MonitorFromPoint(wintypes.POINT(int(x), int(y)), default)
+
+
+def _monitor_scale(hmon):
+    dx, dy = wintypes.UINT(), wintypes.UINT()
+    ctypes.windll.shcore.GetDpiForMonitor(hmon, 0, ctypes.byref(dx), ctypes.byref(dy))
+    return (dx.value + dy.value) / 192
+
+
+def _work_area(hmon):
+    mi = _MONITORINFO()
+    mi.cbSize = ctypes.sizeof(mi)
+    _u32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+    r = mi.rcWork
+    return r.left, r.top, r.right, r.bottom
+
+
+def _window_rect(window):
+    r = wintypes.RECT()
+    _u32.GetWindowRect(_frame_hwnd(window), ctypes.byref(r))
+    return r.left, r.top, r.right, r.bottom
+
+
+def _center_monitor(window):
+    left, top, right, bottom = _window_rect(window)
+    return _monitor_at((left + right) / 2, (top + bottom) / 2)
+
+
+_orig_dpi = ScalingTracker.get_window_dpi_scaling
+_orig_update = ScalingTracker.update_scaling_callbacks_for_window
+
+
+def _dpi_scaling(cls, window):
+    try:
+        if not window.winfo_viewable():
+            master = getattr(window, "master", None)
+            if master is None and _ROOT_POS:
+                return _monitor_scale(_monitor_at(*_ROOT_POS))
+            if master is not None and master.winfo_exists() and master.winfo_toplevel().winfo_viewable():
+                return _monitor_scale(_center_monitor(master.winfo_toplevel()))
+        if _u32.GetAsyncKeyState(0x01) & 0x8000 and window in cls.window_dpi_scaling_dict:
+            return cls.window_dpi_scaling_dict[window]       # przeciąganie – przeskaluj po upuszczeniu
+        return _monitor_scale(_center_monitor(window))
+    except Exception:
+        return _orig_dpi(window)
+
+
+def _fit_on_monitor(window):
+    """Wsuń okno w całości w obszar roboczy monitora, na którym jest jego środek."""
+    try:
+        if not window.winfo_exists() or not window.winfo_viewable():
+            return
+        left, top, right, bottom = _window_rect(window)
+        L, T, R, B = _work_area(_center_monitor(window))
+        x = int(min(max(left, L), max(L, R - (right - left))))
+        y = int(min(max(top, T), max(T, B - (bottom - top))))
+        if (x, y) != (left, top):
+            _u32.SetWindowPos(_frame_hwnd(window), None, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010)
+    except Exception:
+        pass
+
+
+def _update_and_fit(cls, window):
+    _orig_update(window)
+    try:
+        window.after(50, lambda: _fit_on_monitor(window))
+    except Exception:
+        pass
+
+
+ScalingTracker.get_window_dpi_scaling = classmethod(_dpi_scaling)
+ScalingTracker.update_scaling_callbacks_for_window = classmethod(_update_and_fit)
+
+
+def place_dialog(win, parent):
+    """Okno opcji: ukryte, dopóki CustomTkinter nie skończy swoich zmian (ikona, kolor paska),
+    potem pokazane raz – wyśrodkowane nad aplikacją, na jej monitorze, w skali tego monitora."""
+    win.transient(parent)                   # najpierw transient – na Windows potrafi z powrotem pokazać okno
+    win.withdraw()
+    win.after(260, lambda: _reveal_dialog(win, parent))
+
+
+def _reveal_dialog(win, parent):
+    if not win.winfo_exists():
+        return
+    if ICON_PATH.exists():
+        try:
+            win.iconbitmap(str(ICON_PATH))
+        except Exception:
+            pass
+    s = ScalingTracker.get_window_scaling(win)
+    pl, pt, pr, pb = _window_rect(parent)
+    L, T, R, B = _work_area(_center_monitor(parent))
+    frame = round(45 * s)                               # pasek tytułu i ramki (poza rozmiarem z geometry)
+    w, h = round(win._current_width * s), round(win._current_height * s) + frame
+    if h > B - T - 10:                                  # wyższe niż ekran (np. laptop) – skróć
+        win.geometry(f"{win._current_width}x{int((B - T - 10 - frame) / s)}")
+        h = round(win._current_height * s) + frame
+    x = int(min(max((pl + pr - w) / 2, L), max(L, R - w)))
+    y = int(min(max(pt + 30, T), max(T, B - h)))
+    win.geometry(f"+{x}+{y}")
+    win.deiconify()
+    win.lift()
+    win.focus_force()
+    try:
+        win.grab_set()
+    except Exception:
+        pass
 
 import recorder      # noqa: E402
 import converter     # noqa: E402
@@ -61,6 +204,7 @@ DEFAULTS = {
     "convert_cores": "auto",     # auto / p / e / all – też przygotowanie dźwięku do transkrypcji
     "appearance": "system",
     "always_on_top": False,      # 📌 w nagłówku
+    "window_pos": None,          # [x, y] – gdzie było okno przy zamknięciu (ten sam monitor po starcie)
 }
 
 CONVERT_CORES = {"auto": "Automatycznie", "p": "P (wydajne)", "e": "E (energooszczędne)", "all": "Wszystkie"}
@@ -859,10 +1003,7 @@ class TranscribeOptions(ctk.CTkToplevel):
         self.title("Opcje transkrypcji")
         self.geometry("660x700")
         self.minsize(560, 420)
-        self.transient(app)
-        self.after(50, self.grab_set)
-        if ICON_PATH.exists():
-            self.after(250, lambda: self.iconbitmap(str(ICON_PATH)))
+        place_dialog(self, app)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
         o = dict(engine.DEFAULT_OPTIONS, **app.cfg["tr_opts"])
@@ -1102,10 +1243,7 @@ class OptionsDialog(ctk.CTkToplevel):
         self.title(title)
         self.geometry(size)
         self.minsize(520, 360)
-        self.transient(app)
-        self.after(50, self.grab_set)
-        if ICON_PATH.exists():
-            self.after(250, lambda: self.iconbitmap(str(ICON_PATH)))
+        place_dialog(self, app)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
@@ -1855,10 +1993,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.title("Ustawienia aplikacji")
         self.geometry("520x220")
         self.resizable(False, False)
-        self.transient(app)
-        self.after(50, self.grab_set)
-        if ICON_PATH.exists():
-            self.after(250, lambda: self.iconbitmap(str(ICON_PATH)))
+        place_dialog(self, app)
         self.grid_columnconfigure(1, weight=1)
         cfg = app.cfg
 
@@ -1895,9 +2030,17 @@ class App(ctk.CTk):
         self.cfg = load_config()
         ctk.set_appearance_mode(self.cfg["appearance"])
         ctk.set_default_color_theme("blue")
+        global _ROOT_POS
+        pos = self.cfg.get("window_pos")
+        if (isinstance(pos, list) and len(pos) == 2
+                and _monitor_at(pos[0] + 60, pos[1] + 20, 0)):     # tylko jeśli ten monitor nadal jest
+            _ROOT_POS = (pos[0] + 60, pos[1] + 20)
+        else:
+            pos = None
         super().__init__(fg_color=BG)
+        self.withdraw()                     # pokaż dopiero gotowe – bez przeskoków rozmiaru
         self.title(APP_NAME)
-        self.geometry("320x420")
+        self.geometry("320x420" + (f"+{pos[0]}+{pos[1]}" if pos else ""))
         self.minsize(320, 420)
         if ICON_PATH.exists():
             try:
@@ -1934,8 +2077,15 @@ class App(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Control-r>", lambda e: self.rec_tab.toggle())
         self.after(100, self._pump)
+        self.after(200, self._reveal)
         self.after(100, self._fast_tick)
         self.after(500, self._slow_tick)
+
+    def _reveal(self):
+        global _ROOT_POS
+        self.deiconify()
+        _ROOT_POS = None
+        self.after(50, lambda: _fit_on_monitor(self))
 
     def toggle_on_top(self):
         self.cfg["always_on_top"] = not self.cfg["always_on_top"]
@@ -2006,6 +2156,12 @@ class App(ctk.CTk):
         for t in self.rec_tab.post_threads:     # proces obróbki dostaje kill w ciągu ~0,5 s
             t.join(timeout=3)
         self.rec_tab.stop_monitor()
+        try:
+            _, _, x, y = self._parse_geometry_string(self.geometry())
+            self.cfg["window_pos"] = [x, y]
+            save_config(self.cfg)
+        except Exception:
+            pass
         self.destroy()
 
 
