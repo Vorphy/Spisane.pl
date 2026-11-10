@@ -15,10 +15,23 @@ do plików Opus, konwersji starych nagrań i kolejki transkrypcji.
 
 Wbudowana (Whisper large-v3-turbo), dawny skrypt `fw-dd.py` jest teraz częścią aplikacji:
 
-- **Grafika Intel Iris Xe** (OpenVINO, domyślnie), ok. 5–7× szybciej, niż trwa nagranie.
+- **Automatycznie** (domyślnie): aplikacja sama wybiera najlepsze urządzenie dla tego komputera.
+  Grafika Intel: OpenVINO. Inna grafika (AMD Radeon, NVIDIA): Vulkan. Brak grafiki: procesor.
+- **Grafika Intel** (OpenVINO): ok. 6× szybciej, niż trwa nagranie.
   Fragmenty pominięte przez model wykrywa VAD i transkrybuje ponownie.
-  Bez grafiki Intel aplikacja sama przechodzi na procesor.
+- **Grafika Vulkan** (whisper.cpp): działa na każdej grafice z Vulkanem, np. AMD Radeon w Ryzenach.
+  Program (budowany z oficjalnych źródeł przez workflow w tym repo, ze sprawdzaną sumą kontrolną)
+  i model (ok. 0,9 GB) pobierają się przy pierwszym użyciu.
 - **Procesor** (faster-whisper): wątki, rdzenie P/E/wszystkie/N, beam size, typ obliczeń.
+- Gdy wybrana grafika nie działa, transkrypcja sama przechodzi na procesor.
+
+Test na nagraniu z ręczną transkrypcją (5,8 min, Intel Iris Xe, ze słownikiem nazw):
+
+| Urządzenie | Błędne słowa (WER) | Błędne litery (CER) | Czas |
+|---|---|---|---|
+| Grafika Intel (OpenVINO) | 22,6% | 12,6% | 59 s |
+| Grafika Vulkan (whisper.cpp, beam 2) | 24,1% | 12,2% | 65 s |
+| Procesor (beam 2, rdzenie P) | 24,4% | 13,4% | 184 s |
 - Formaty txt (z czasem albo bez), srt, vtt albo wszystkie naraz; filtr VAD; przycinanie do zadanego czasu.
 - **Zatrzymaj** zapisuje stan, a **Transkrybuj** wznawia od tego miejsca, także po ponownym uruchomieniu aplikacji.
 - **Monitor folderu**: nowe nagrania same trafiają do kolejki, gdy skończy się ich zapis

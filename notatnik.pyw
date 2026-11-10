@@ -750,10 +750,13 @@ class TranscribeTab(FileQueue):
 
     def update_summary(self):
         o = self.opts
-        dev = {"igpu": "grafika Intel", "cpu": f"CPU ({o['threads']} wątków, rdzenie {o['cores']})",
-               "cuda": "NVIDIA"}[o["device"]]
+        real = engine.auto_device() if o["device"] == "auto" else o["device"]
+        dev = {"igpu": "grafika Intel", "vulkan": "grafika (Vulkan)",
+               "cpu": f"CPU ({o['threads']} wątków, rdzenie {o['cores']})", "cuda": "NVIDIA"}[real]
+        if o["device"] == "auto":
+            dev = f"auto: {dev}"
         parts = [o["model"], o["language"], dev, o["format"] + ("" if o["timestamps"] else " bez czasu")]
-        if o["device"] != "igpu":
+        if real in ("cpu", "cuda"):
             parts.append(f"beam {o['beam_size']}")
         if not o["vad"]:
             parts.append("bez VAD")
@@ -899,7 +902,8 @@ class TranscribeTab(FileQueue):
             self._start_running()
 
     def _start_running(self):
-        if not deps.ensure_transcription(self.app, self.opts["device"]):
+        dev = engine.auto_device() if self.opts["device"] == "auto" else self.opts["device"]
+        if not deps.ensure_transcription(self.app, dev):
             messagebox.showerror(APP_NAME, "Bez pakietu faster-whisper transkrypcja nie zadziała.", parent=self)
             if self.watching:
                 self.watch_sw.deselect()
@@ -1057,8 +1061,10 @@ class TranscribeTab(FileQueue):
         kind = ev["ev"]
         if kind == "loaded":
             self.worker_ready = True
-            if ev["device"] != self.opts["device"]:
-                self.live.configure(text=f"Grafika niedostępna – transkrypcja na {ev['device'].upper()}")
+            want = engine.auto_device() if self.opts["device"] == "auto" else self.opts["device"]
+            if ev["device"] != want:
+                self.live.configure(text=f"Grafika niedostępna – transkrypcja na: "
+                                         f"{engine.DEVICE_LABELS.get(ev['device'], ev['device'])}")
             if self.pending:
                 row, audio = self.pending
                 self.pending = None
@@ -1186,7 +1192,10 @@ class TranscribeTab(FileQueue):
 # ══════════════════════════════════════════════════════════════════════════
 class TranscribeOptions(ctk.CTkToplevel):
     LANGS = ["pl", "en", "de", "fr", "es", "it", "uk", "ru", "cs"]
-    DEVICES = {"igpu": "Grafika Intel", "cpu": "Procesor", "cuda": "NVIDIA"}
+    DEVICES = {"auto": "Automatycznie", "igpu": "Grafika Intel", "vulkan": "Grafika Vulkan",
+               "cpu": "Procesor", "cuda": "NVIDIA"}
+    # urządzenia ze stałymi ustawieniami (typ obliczeń, beam) – pola są wtedy tylko do odczytu
+    FIXED = {"igpu": ("int8", "1"), "vulkan": ("q8_0", str(engine.VULKAN_BEAM))}
     CORES = {"e": "E (energooszczędne)", "p": "P (wydajne)", "all": "wszystkie", "n": "pierwsze N"}
 
     def __init__(self, app, tab):
@@ -1215,13 +1224,18 @@ class TranscribeOptions(ctk.CTkToplevel):
 
         # ── urządzenie ──
         self.device = ctk.CTkSegmentedButton(body, values=list(self.DEVICES.values()), command=lambda _: self._sync())
-        self.device.set(self.DEVICES[o["device"]])
+        self.device.set(self.DEVICES.get(o["device"], self.DEVICES["auto"]))
+        gpus = engine.detect_gpus()
+        self._auto_dev = engine.auto_device()
         self._place("Urządzenie", self.device,
-                    "Grafika Intel Iris Xe: ok. 6–8× szybciej, niż trwa nagranie (beam 1). W teście z ręczną "
-                    "transkrypcją jakość równa procesorowi z beam 2. Bez grafiki Intel samo przejdzie na procesor.\n"
-                    "Procesor: ok. 2,5× wolniej niż grafika; beam 2+ daje tu niewiele.\n"
-                    "NVIDIA (CUDA): dla komputerów z kartą GeForce/RTX – zwykle najszybsza opcja; brakujące "
-                    "biblioteki CUDA aplikacja zaproponuje doinstalować. Bez karty NVIDIA samo przejdzie na procesor.")
+                    f"Ten komputer: {', '.join(gpus) or 'brak karty graficznej'}. Automatycznie wybiera: "
+                    f"{engine.DEVICE_LABELS[self._auto_dev]}.\n"
+                    "Grafika Intel (OpenVINO): najszybsza na Intelu, ok. 6× szybciej, niż trwa nagranie; najmniej błędów.\n"
+                    "Grafika Vulkan (whisper.cpp): każda grafika – AMD Radeon, Intel, NVIDIA. Na Iris Xe prawie tak "
+                    "szybka jak OpenVINO i dokładniejsza od procesora. Program i model (ok. 0,9 GB) pobiorą się raz.\n"
+                    "Procesor: ok. 3× wolniej niż grafika. NVIDIA (CUDA): karty GeForce/RTX; brakujące biblioteki "
+                    "aplikacja zaproponuje doinstalować.\n"
+                    "Gdy wybrana grafika nie działa, transkrypcja sama przejdzie na procesor.")
 
         # wartości dla procesora/NVIDIA – przy grafice Intel pola pokazują stałe int8 / 1
         self._cpu_vals = {"compute": o["compute_type"], "beam": str(o["beam_size"])}
@@ -1344,23 +1358,30 @@ class TranscribeOptions(ctk.CTkToplevel):
 
     def _sync(self):
         dev = self._dev()
+        real = self._auto_dev if dev == "auto" else dev
         self.model_hint.configure(text=engine.MODEL_INFO.get(self.model.get(), ""))
-        igpu = dev == "igpu"
-        if igpu and not self._igpu_shown:          # zapamiętaj ustawienia procesora, pokaż stałe wartości
+        fixed = self.FIXED.get(real)
+        if fixed and not self._igpu_shown:          # zapamiętaj ustawienia procesora, pokaż stałe wartości
             self._cpu_vals = {"compute": self.compute.get(), "beam": self.beam.get()}
-            self.compute.set("int8")
-            self._set_entry(self.beam, "1")
-        elif not igpu and self._igpu_shown:         # wróć do ustawień procesora
+        if fixed:
+            self.compute.set(fixed[0])
+            self._set_entry(self.beam, fixed[1])
+        elif self._igpu_shown:                      # wróć do ustawień procesora
             self.compute.set(self._cpu_vals["compute"])
             self._set_entry(self.beam, self._cpu_vals["beam"])
-        self._igpu_shown = igpu
+        self._igpu_shown = bool(fixed)
         for w in (self.compute, self.beam):
-            w.configure(state="disabled" if igpu else "normal")
-        if igpu:
+            w.configure(state="disabled" if fixed else "normal")
+        if real == "igpu":
             self.compute_hint.configure(text="Grafika Intel: model jest zawsze int8 (tak go przygotowano pod OpenVINO).")
             self.beam_hint.configure(text="Grafika Intel obsługuje tylko beam 1 – OpenVINO nie ma beam search na GPU. "
                                           "Fragmenty pominięte przez model nadrabia weryfikacja VAD. "
                                           "Wyższy beam (np. 2 dla ważnych nagrań): wybierz Procesor.")
+        elif real == "vulkan":
+            self.compute_hint.configure(text="Grafika Vulkan: model q8_0 (whisper.cpp) – w teście tak samo dokładny "
+                                             "jak pełny, a dwa razy mniejszy.")
+            self.beam_hint.configure(text=f"Grafika Vulkan: beam {engine.VULKAN_BEAM} – w teście tak samo dokładny "
+                                          "jak 5, a szybszy.")
         else:
             self.compute_hint.configure(text="int8 – najszybszy pod CPU; float16 – zalecany dla NVIDIA")
             self.beam_hint.configure(text="wyższy = dokładniejszy, ale wolniejszy (domyślnie 2)")
@@ -1403,9 +1424,10 @@ class TranscribeOptions(ctk.CTkToplevel):
         TranscribeOptions(self.app, self.tab)
 
     def _save(self):
-        igpu = self._dev() == "igpu"
-        beam_txt = self._cpu_vals["beam"] if igpu else self.beam.get()
-        compute = self._cpu_vals["compute"] if igpu else self.compute.get()
+        dev = self._dev()
+        fixed = (self._auto_dev if dev == "auto" else dev) in self.FIXED
+        beam_txt = self._cpu_vals["beam"] if fixed else self.beam.get()
+        compute = self._cpu_vals["compute"] if fixed else self.compute.get()
         try:
             beam, threads = int(beam_txt), int(self.threads.get())
             if beam < 1 or threads < 1:

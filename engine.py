@@ -40,7 +40,7 @@ FORMATS = ["txt", "srt", "vtt", "all"]
 DEFAULT_OPTIONS = {
     "model": "large-v3-turbo",
     "language": "pl",
-    "device": "igpu",          # igpu / cpu / cuda
+    "device": "auto",          # auto / igpu / vulkan / cpu / cuda
     "compute_type": "int8",    # nie dotyczy igpu (tam zawsze int8)
     "threads": 8,
     "cores": "e",              # e / p / all / liczba N
@@ -480,6 +480,214 @@ class FasterWhisperPortions(PortionWhisper):
         return [(offset + sg.start, offset + sg.end, sg.text.strip()) for sg in segs if sg.text.strip()]
 
 
+# ── whisper.cpp + Vulkan (grafiki AMD, Intel, NVIDIA) ────────────────────
+# Program budowany z oficjalnych źródeł whisper.cpp przez workflow w repo (.github/workflows/whisper-vulkan.yml),
+# publikowany jako wydanie; suma SHA-256 chroni przed podmianą pliku.
+# Test 2026-11-10 na wzorcu (ręczna transkrypcja): natywnie (cały plik, VAD whisper.cpp, słownik jako prompt
+# doklejany do okien) q8 beam 2 – WER 24,1%, CER 12,2%, 65 s / 5,8 min na Iris Xe; OpenVINO 22,6% / 12,6% / 59 s;
+# procesor beam 2 – 24,4% / 13,4% / 184 s. Przez nasze porcje 28 s whisper.cpp wypadał wyraźnie gorzej
+# (27–29%), dlatego dostaje cały plik.
+WCPP_TAG = "whisper-vulkan-v1.9.5"
+WCPP_URL = f"https://github.com/Vorphy/Spisane.pl/releases/download/{WCPP_TAG}/whisper-vulkan-win-x64.zip"
+WCPP_SHA256 = "43bd7e0c2026765911f4e283c45edaf7f2f6286d6cc9b7d417a4baf72732a43b"
+WCPP_DIR = Path.home() / ".cache" / "whisper-cpp" / WCPP_TAG
+VULKAN_BEAM = 2
+DEVICE_LABELS = {"igpu": "grafika Intel (OpenVINO)", "vulkan": "grafika (Vulkan)", "cpu": "procesor",
+                 "cuda": "NVIDIA (CUDA)"}
+
+
+def detect_gpus():
+    """Nazwy kart graficznych (bez wirtualnych i zdalnych), np. ['Intel(R) Iris(R) Xe Graphics']."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    class DISPLAY_DEVICEW(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("DeviceName", wintypes.WCHAR * 32),
+                    ("DeviceString", wintypes.WCHAR * 128), ("StateFlags", wintypes.DWORD),
+                    ("DeviceID", wintypes.WCHAR * 128), ("DeviceKey", wintypes.WCHAR * 128)]
+    names, i = [], 0
+    while True:
+        d = DISPLAY_DEVICEW()
+        d.cb = ctypes.sizeof(d)
+        if not ctypes.windll.user32.EnumDisplayDevicesW(None, i, ctypes.byref(d), 0):
+            break
+        i += 1
+        n = d.DeviceString.strip()
+        if n and n not in names and not re.search(r"microsoft|remote|virtual|displaylink|parsec|meta", n, re.I):
+            names.append(n)
+    return names
+
+
+def vulkan_available():
+    return os.name == "nt" and (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "vulkan-1.dll").exists()
+
+
+def auto_device():
+    """Najlepsze urządzenie dla tego komputera: grafika Intel -> OpenVINO, inna grafika -> Vulkan, brak -> procesor."""
+    import importlib.util
+    gpus = detect_gpus()
+    if any("intel" in g.lower() for g in gpus) and importlib.util.find_spec("openvino_genai"):
+        return "igpu"
+    if gpus and vulkan_available():
+        return "vulkan"
+    return "cpu"
+
+
+def _download(url, dest, log, what):
+    import urllib.request
+    tmp = dest.with_name(dest.name + ".part")
+    with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        done, shown = 0, -1
+        while True:
+            b = r.read(1 << 20)
+            if not b:
+                break
+            f.write(b)
+            done += len(b)
+            if total and int(done * 10 / total) != shown:
+                shown = int(done * 10 / total)
+                log(f"Pobieram {what}: {done * 100 // total}%")
+    tmp.replace(dest)
+
+
+def _wcpp_binary(log):
+    exe = WCPP_DIR / "whisper-cli.exe"
+    if exe.exists():
+        return exe
+    import hashlib
+    import zipfile
+    WCPP_DIR.mkdir(parents=True, exist_ok=True)
+    z = WCPP_DIR / "whisper.zip"
+    _download(WCPP_URL, z, log, "program whisper.cpp (Vulkan, ok. 30 MB)")
+    if hashlib.sha256(z.read_bytes()).hexdigest() != WCPP_SHA256:
+        z.unlink(missing_ok=True)
+        raise RuntimeError("pobrany program whisper.cpp ma złą sumę kontrolną – nie uruchamiam go")
+    with zipfile.ZipFile(z) as zf:
+        zf.extractall(WCPP_DIR)
+    z.unlink(missing_ok=True)
+    return exe
+
+
+def _wcpp_model(name, log):
+    """Model GGML z ggerganov/whisper.cpp (kwantyzacja q8_0, gdy jest – tak testowane; inaczej pełny)."""
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError
+    for fn in (f"ggml-{name}-q8_0.bin", f"ggml-{name}.bin"):
+        try:
+            try:
+                return hf_hub_download("ggerganov/whisper.cpp", fn, local_files_only=True)
+            except Exception:
+                log(f"Pobieram model {fn} (jednorazowo)…")
+                return hf_hub_download("ggerganov/whisper.cpp", fn)
+        except EntryNotFoundError:
+            continue
+    raise RuntimeError(f"brak modelu {name} dla whisper.cpp")
+
+
+def _wcpp_vad(log):
+    from huggingface_hub import hf_hub_download
+    try:
+        return hf_hub_download("ggml-org/whisper-vad", "ggml-silero-v5.1.2.bin", local_files_only=True)
+    except Exception:
+        log("Pobieram model wykrywania mowy (1 MB)…")
+        return hf_hub_download("ggml-org/whisper-vad", "ggml-silero-v5.1.2.bin")
+
+
+def _write_wav(path, audio, sr=16000):
+    import wave
+    import numpy as np
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+
+
+class VulkanWhisper:
+    """whisper.cpp na grafice przez Vulkan. Interfejs jak WhisperModel.transcribe(): generator segmentów + info.
+    Cały plik idzie do whisper-cli (jego VAD i kontekst między oknami – tak wypadł najlepiej); segmenty czytamy
+    na bieżąco z wyjścia programu, więc postęp, zatrzymanie i wznawianie działają jak w pozostałych silnikach."""
+
+    SR = 16000
+    _LINE = re.compile(r"\s*\[(\d+):(\d+):([\d.]+)\s*-->\s*(\d+):(\d+):([\d.]+)\]\s?(.*)")
+
+    def __init__(self, model_name, log=print, threads=4):
+        self.log = log
+        self.threads = max(1, min(int(threads), 8))
+        self.exe = _wcpp_binary(log)
+        self.model = _wcpp_model(model_name, log)
+        self.vad = _wcpp_vad(log)
+        self.gpu = self._selftest()
+
+    def _popen(self, args, stdout, stderr):
+        import subprocess
+        flags = (subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS) if os.name == "nt" else 0
+        p = subprocess.Popen([str(self.exe), "-m", str(self.model), "-t", str(self.threads), *args],
+                             stdout=stdout, stderr=stderr, stdin=subprocess.DEVNULL, creationflags=flags)
+        no_power_throttling(getattr(p, "_handle", None))
+        return p
+
+    def _selftest(self):
+        """Krótki przebieg na 1 s ciszy: czy program działa i czy Vulkan widzi kartę (inaczej liczyłby na CPU)."""
+        import subprocess
+        import tempfile
+        import numpy as np
+        with tempfile.TemporaryDirectory() as d:
+            wav = Path(d) / "cisza.wav"
+            _write_wav(wav, np.zeros(self.SR, np.float32))
+            p = self._popen(["-f", str(wav), "-l", "pl"], subprocess.DEVNULL, subprocess.PIPE)
+            _, err = p.communicate(timeout=300)
+        err = err.decode("utf-8", "replace")
+        m = re.search(r"ggml_vulkan: 0 = ([^|\r\n]+)", err)
+        if p.returncode != 0:
+            raise RuntimeError(f"whisper.cpp nie działa (kod {p.returncode})")
+        if not m or "using Vulkan" not in err:
+            raise RuntimeError("Vulkan nie widzi karty graficznej (stary sterownik?)")
+        return m.group(1).strip()
+
+    def transcribe(self, audio, language="pl", vad_filter=True, initial_prompt=None, beam_size=VULKAN_BEAM,
+                   hotwords=None, **_ignored):
+        from types import SimpleNamespace
+        from faster_whisper import decode_audio
+        if isinstance(audio, str):
+            audio = decode_audio(audio, sampling_rate=self.SR)
+        info = SimpleNamespace(duration=len(audio) / self.SR)
+        prompt = " ".join(x for x in ((hotwords or "").strip(), (initial_prompt or "").strip()) if x)
+        return self._segments(audio, language, vad_filter, prompt, int(beam_size)), info
+
+    def _segments(self, audio, language, vad_filter, prompt, beam):
+        import subprocess
+        import tempfile
+        d = tempfile.mkdtemp(prefix="notatnik-wcpp-")
+        wav = Path(d) / "audio.wav"
+        _write_wav(wav, audio)
+        args = ["-f", str(wav), "-l", language, "-bs", str(beam), "-np"]
+        if vad_filter:
+            args += ["--vad", "-vm", str(self.vad)]
+        if prompt:
+            args += ["--prompt", prompt, "--carry-initial-prompt"]
+        p = self._popen(args, subprocess.PIPE, subprocess.DEVNULL)
+        try:
+            for raw in p.stdout:
+                m = self._LINE.match(raw.decode("utf-8", "replace").rstrip("\r\n"))
+                if not m or not m.group(7).strip():
+                    continue
+                h1, m1, s1, h2, m2, s2, text = m.groups()
+                yield Segment(int(h1) * 3600 + int(m1) * 60 + float(s1),
+                              int(h2) * 3600 + int(m2) * 60 + float(s2), " " + text.strip())
+            if p.wait() != 0:
+                raise RuntimeError(f"whisper.cpp zakończył się błędem (kod {p.returncode})")
+        finally:
+            if p.poll() is None:            # zatrzymanie w trakcie (Zatrzymaj / zamknięcie)
+                p.kill()
+                p.wait()
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+
 # ── NVIDIA (CUDA) ────────────────────────────────────────────────────────
 CUDA_PACKAGES = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12==9.*"]   # wymagane przez CTranslate2 4.x
 
@@ -523,11 +731,25 @@ class LoadedModel:
 
 
 def load_model(opts, log=print):
-    """Ładuje model wg opcji; przypina proces do rdzeni. Przy braku grafiki Intel przechodzi na CPU."""
+    """Ładuje model wg opcji; przypina proces do rdzeni. Gdy grafika (Intel / Vulkan / NVIDIA) zawiedzie,
+    przechodzi na CPU. device="auto" – wybór wg sprzętu (auto_device)."""
     device = opts["device"]
+    if device == "auto":
+        gpus = detect_gpus()
+        device = auto_device()
+        log(f"Automatycznie: {DEVICE_LABELS[device]} (karty: {', '.join(gpus) or 'brak'})")
     if device in ("cpu", "igpu"):
         log(f"Rdzenie: {apply_cores(opts['cores'])}")
     model = None
+    if device == "vulkan":
+        try:
+            model = VulkanWhisper(opts["model"], log=log)
+            log(f"Urządzenie: grafika {model.gpu} (Vulkan, whisper.cpp, beam {VULKAN_BEAM})")
+        except Exception as ex:
+            log(f"[Ostrzeżenie] Grafika przez Vulkan niedostępna: {ex}")
+            log(f"Przełączam na CPU ({opts['threads']} wątków).")
+            log(f"Rdzenie: {apply_cores(opts['cores'])}")
+            device = "cpu"
     if device == "igpu":
         try:
             model = IGPUWhisper(opts["model"], log=log)
@@ -559,7 +781,7 @@ def load_model(opts, log=print):
         model = WhisperModel(opts["model"], device="cpu", compute_type=compute,
                              cpu_threads=int(opts["threads"]))
         log(f"Urządzenie: cpu ({compute}, {opts['threads']} wątków)")
-    if not isinstance(model, PortionWhisper):
+    if not isinstance(model, (PortionWhisper, VulkanWhisper)):
         model = FasterWhisperPortions(model, log=log)     # te same porcje ≤ 28 s co na grafice
     return LoadedModel(model, device, opts)
 
@@ -650,7 +872,7 @@ def transcribe_file(lm, audio_path, opts, on_segment=None, on_progress=None, sho
 
     kwargs = {
         "language": opts["language"],
-        "beam_size": 1 if lm.device == "igpu" else int(opts["beam_size"]),
+        "beam_size": {"igpu": 1, "vulkan": VULKAN_BEAM}.get(lm.device, int(opts["beam_size"])),
         "vad_filter": bool(opts["vad"]),
         # Bez przenoszenia kontekstu między oknami 30 s – zapobiega zapętlaniu zdań
         "condition_on_previous_text": False,

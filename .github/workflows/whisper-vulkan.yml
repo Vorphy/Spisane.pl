@@ -1,0 +1,58 @@
+# Kompilacja whisper.cpp z obsługą Vulkan (grafiki AMD, Intel, NVIDIA) dla Windows x64.
+# Oficjalne wydania whisper.cpp nie mają takiej wersji. Wynik trafia do wydania (pre-release)
+# „whisper-vulkan-<wersja>”, skąd aplikacja albo testy mogą go pobrać bez logowania.
+name: whisper.cpp Vulkan (Windows)
+
+# Tylko ręcznie (Actions → Run workflow). Nowa wersja whisper.cpp = zmienić WHISPER_VERSION, uruchomić,
+# a potem w engine.py ustawić WCPP_TAG i WCPP_SHA256 nowego pliku (aplikacja sprawdza sumę przed uruchomieniem).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write          # utworzenie wydania z plikami
+
+env:
+  WHISPER_VERSION: v1.9.5
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Vulkan SDK
+        shell: pwsh
+        run: |
+          curl.exe -sSL -o "$env:RUNNER_TEMP\vulkan-sdk.exe" "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe"
+          & "$env:RUNNER_TEMP\vulkan-sdk.exe" --accept-licenses --default-answer --confirm-command install | Out-Null
+          $sdk = (Get-ChildItem C:\VulkanSDK | Sort-Object Name | Select-Object -Last 1).FullName
+          "VULKAN_SDK=$sdk" | Add-Content $env:GITHUB_ENV
+          "$sdk\Bin" | Add-Content $env:GITHUB_PATH
+          Write-Host "Vulkan SDK: $sdk"
+
+      - name: Źródła whisper.cpp
+        run: git clone --depth 1 --branch ${{ env.WHISPER_VERSION }} https://github.com/ggml-org/whisper.cpp src
+
+      - name: Kompilacja
+        shell: pwsh
+        run: |
+          cmake -S src -B build -DGGML_VULKAN=ON -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DBUILD_SHARED_LIBS=OFF `
+                -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_SDL2=OFF
+          cmake --build build --config Release -j 4 --target whisper-cli whisper-server
+          New-Item -ItemType Directory out | Out-Null
+          Copy-Item build\bin\Release\whisper-cli.exe, build\bin\Release\whisper-server.exe out\
+          Copy-Item src\LICENSE out\LICENSE-whisper.cpp.txt
+          Get-ChildItem out
+
+      - name: Spakowanie
+        shell: pwsh
+        run: Compress-Archive -Path out\* -DestinationPath whisper-vulkan-win-x64.zip
+
+      - name: Wydanie
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: whisper-vulkan-${{ env.WHISPER_VERSION }}
+          name: whisper.cpp ${{ env.WHISPER_VERSION }} – Vulkan, Windows x64
+          prerelease: true
+          files: whisper-vulkan-win-x64.zip
+          body: |
+            whisper.cpp ${{ env.WHISPER_VERSION }} skompilowany z GGML_VULKAN=ON (grafiki AMD, Intel, NVIDIA).
+            Zbudowany automatycznie przez workflow `.github/workflows/whisper-vulkan.yml` z oficjalnych źródeł.
