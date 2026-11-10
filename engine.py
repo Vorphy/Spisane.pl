@@ -145,10 +145,28 @@ def detect_core_types():
         return all_cpus, []
 
 
+def system_reserve():
+    """Ile wątków CPU zostawić systemowi i pracy na pierwszym planie przy kilku konwersjach naraz:
+    do 4 wątków – 1, do 8 – 2, więcej – 4. Zostawiane są pierwsze (na procesorach Intel z rdzeniami P/E
+    to rdzenie P – najlepsze do pracy na pierwszym planie)."""
+    n = len(sum(detect_core_types(), []))
+    return 1 if n <= 4 else 2 if n <= 8 else 4
+
+
+def max_parallel():
+    """Najwięcej plików naraz = wątki poza zapasem dla systemu."""
+    return max(1, len(sum(detect_core_types(), [])) - system_reserve())
+
+
 def cores_mask(cores):
-    """('p' | 'e' | 'all' | N) -> (maska bitowa albo None = wszystkie, opis)."""
+    """('p' | 'e' | 'all' | 'rest' | N) -> (maska bitowa albo None = wszystkie, opis).
+    'rest' = wszystkie poza zapasem dla systemu (system_reserve)."""
     p, e = detect_core_types()
     all_cpus = sorted(p + e)
+    if cores == "rest":
+        k = system_reserve()
+        selected = (p + e)[k:] or (p + e)
+        return sum(1 << c for c in selected), f"poza {k} dla systemu: CPU {','.join(map(str, selected))}"
     if cores == "all":
         return None, f"wszystkie ({len(all_cpus)} CPU)"
     if cores == "p":

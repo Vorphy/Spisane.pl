@@ -76,6 +76,22 @@ def no_power_throttling(handle=None):
     return False
 
 
+def on_battery():
+    """True, gdy laptop działa z baterii (bez zasilacza)."""
+    if not _k32:
+        return False
+
+    class _SPS(ctypes.Structure):
+        _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
+                    ("BatteryLifePercent", ctypes.c_ubyte), ("SystemStatusFlag", ctypes.c_ubyte),
+                    ("BatteryLifeTime", wintypes.DWORD), ("BatteryFullLifeTime", wintypes.DWORD)]
+    s = _SPS()
+    try:
+        return bool(_k32.GetSystemPowerStatus(ctypes.byref(s))) and s.ACLineStatus == 0
+    except Exception:
+        return False
+
+
 def keep_awake(on):
     """Komputer nie zaśnie (ekran może się wygasić), dopóki trwa nagrywanie lub obróbka."""
     if not _k32:

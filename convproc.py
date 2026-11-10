@@ -35,6 +35,10 @@ class ConvertError(RuntimeError):
 
 
 def resolve_cores(cores, recording=None):
+    """cores: 'auto' / 'p' / 'e' / 'all' / 'rest' / N albo funkcja zwracająca jedno z nich
+    (sprawdzana co CHECK_EVERY – np. kilka konwersji naraz, a potem ostatni plik sam na P)."""
+    if callable(cores):
+        return str(cores())
     if str(cores) == "auto":
         return "e" if (recording and recording()) else "p"
     return str(cores)

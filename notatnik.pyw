@@ -388,6 +388,7 @@ DEFAULTS = {
     "denoise_convert": True,
     "denoise_transcribe": True,
     "convert_cores": "auto",     # auto / p / e / all – też przygotowanie dźwięku do transkrypcji
+    "convert_parallel": "auto",  # ile plików konwertować naraz: auto albo liczba (≤ wątki poza zapasem)
     "appearance": "system",
     "always_on_top": False,      # 📌 w nagłówku
     "tray": True,                # minimalizacja chowa okno do zasobnika
@@ -398,7 +399,8 @@ DEFAULTS = {
 }
 
 CONVERT_CORES = {"auto": "Automatycznie", "p": "P (wydajne)", "e": "E (energooszczędne)", "all": "Wszystkie"}
-CORE_NAMES = {"p": "P (wydajne)", "e": "E (energooszczędne)", "all": "wszystkie"}
+CORE_NAMES = {"p": "P (wydajne)", "e": "E (energooszczędne)", "all": "wszystkie",
+              "rest": "poza zapasem dla systemu"}
 
 CONVERT_EXT = {".mp4", ".mkv", ".webm", ".mov", ".m4a", ".mp3", ".wav", ".flac", ".aac", ".wma", ".ogg"}
 
@@ -445,6 +447,8 @@ def load_config():
     cfg.pop("delete_original", None)
     if cfg.get("convert_cores") not in CONVERT_CORES:
         cfg["convert_cores"] = "auto"
+    if not (cfg.get("convert_parallel") == "auto" or str(cfg.get("convert_parallel")).isdigit()):
+        cfg["convert_parallel"] = "auto"
     cfg["tr_opts"] = {**engine.DEFAULT_OPTIONS, **{k: v for k, v in (cfg.get("tr_opts") or {}).items()
                                                    if k in engine.DEFAULT_OPTIONS}}
     return cfg
@@ -1632,11 +1636,12 @@ class RecordOptions(OptionsDialog):
 
 
 class ConvertOptions(OptionsDialog):
-    KEYS = ("convert_bitrate", "level_convert", "denoise_convert", "convert_cores",
+    KEYS = ("convert_bitrate", "level_convert", "denoise_convert", "convert_cores", "convert_parallel",
             "original_action", "convert_out_dir")
     OUT = {"beside": "Obok oryginału", "folder": "Wybrany folder"}
     CORE_HINTS = {
-        "auto": "E podczas nagrywania, P poza nim – przełącza się w trakcie pliku.",
+        "auto": "Jeden plik: P (najszybciej). Kilka naraz: wątki poza zapasem dla systemu (u Intela rdzenie E). "
+                "Podczas nagrywania: E. Przełącza się w trakcie pliku.",
         "p": "Najszybciej (ok. 2× szybciej niż E), ale konkuruje z aplikacjami na pierwszym planie.",
         "e": "Wolniej, za to rdzenie P zostają wolne dla Teams i innych aplikacji.",
         "all": "Windows sam przydziela – konwersja i tak używa jednego wątku.",
@@ -1671,6 +1676,17 @@ class ConvertOptions(OptionsDialog):
                                             command=lambda _: self._sync())
         self.cores.set(CONVERT_CORES[cfg["convert_cores"]])
         self.cores_hint = self._place("Rdzenie CPU", self.cores, " ")
+
+        mx, res = engine.max_parallel(), engine.system_reserve()
+        self.parallel = ctk.CTkOptionMenu(self.body, width=160,
+                                          values=["Automatycznie"] + [str(i) for i in range(1, mx + 1)])
+        cur = str(cfg["convert_parallel"])
+        self.parallel.set("Automatycznie" if cur == "auto" else str(min(int(cur), mx)))
+        self._place("Plików naraz", self.parallel,
+                    f"Ten komputer: {mx + res} wątków procesora; {res} zostaje dla systemu i Twojej pracy, "
+                    f"więc najwyżej {mx} plików naraz. Automatycznie: do {min(ConvertTab.AUTO_PARALLEL, mx)} "
+                    "(w pomiarze 3 pliki naraz były szybsze niż po kolei, a więcej nie przyspiesza laptopa "
+                    "z limitem mocy); podczas nagrywania do 2, na baterii 1.")
 
         self.original = ctk.CTkSegmentedButton(self.body, values=list(ORIGINAL_ACTIONS.values()),
                                                command=lambda _: self._sync())
@@ -1727,6 +1743,7 @@ class ConvertOptions(OptionsDialog):
         cfg["level_convert"] = bool(self.level.get())
         cfg["denoise_convert"] = bool(self.denoise.get())
         cfg["convert_cores"] = self._key(CONVERT_CORES, self.cores.get())
+        cfg["convert_parallel"] = "auto" if self.parallel.get() == "Automatycznie" else self.parallel.get()
         cfg["original_action"] = self._key(ORIGINAL_ACTIONS, self.original.get())
         cfg["convert_out_dir"] = out
         save_config(cfg)
@@ -1739,6 +1756,7 @@ class ConvertOptions(OptionsDialog):
 # ══════════════════════════════════════════════════════════════════════════
 class ConvertTab(FileQueue):
     START_VERB = "Konwertuj"
+    AUTO_PARALLEL = 3        # pomiar 2026-11-10 (i5-1345U): 3 naraz na E szybciej niż po kolei na P
 
     def __init__(self, master, app):
         super().__init__(master, app, "Dodaj nagrania MP4 (np. z OBS) albo cały folder.\n"
@@ -1750,6 +1768,10 @@ class ConvertTab(FileQueue):
         self.saved_total = 0      # faktycznie odzyskane (oryginały usunięte na stałe)
         self.trashed = 0          # oryginały w Koszu – miejsce wróci po opróżnieniu Kosza
         self.potential = 0        # do odzyskania po ręcznym usunięciu oryginałów
+        self._lock = threading.Lock()
+        self._claimed = set()     # pliki wzięte w tej serii
+        self._active = 0          # ile konwersji trwa
+        self._last_kind = ""
 
         ctk.CTkButton(self.toolbar, text="⚙", width=30, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray80"), hover_color=CARD,
@@ -1780,6 +1802,9 @@ class ConvertTab(FileQueue):
         parts.append(" + ".join(fx) if fx else "bez obróbki")
         parts.append("rdzenie " + {"auto": "automatycznie"}.get(c["convert_cores"],
                                                                CORE_NAMES.get(c["convert_cores"], "")))
+        par = str(c["convert_parallel"])
+        parts.append(f"do {min(self.AUTO_PARALLEL, engine.max_parallel())} plików naraz" if par == "auto"
+                     else ("plik po pliku" if par == "1" else f"{par} pliki naraz"))
         parts.append({"keep": "oryginał zostaje", "trash": "oryginał do Kosza",
                       "delete": "oryginał usuwany na stałe"}[c["original_action"]])
         out = c["convert_out_dir"]
@@ -1835,57 +1860,126 @@ class ConvertTab(FileQueue):
         self.worker = threading.Thread(target=self._work, daemon=True)
         self.worker.start()
 
+    def parallel_limit(self, cfg=None):
+        """Ile plików konwertować naraz w tej chwili.
+        Automatycznie: do AUTO_PARALLEL (ale nie więcej niż wątków poza zapasem dla systemu); podczas
+        nagrywania najwyżej 2; na baterii 1. Ręczny wybór – tyle, ile ustawiono (w granicach zapasu)."""
+        c = cfg or self.app.cfg
+        mx = engine.max_parallel()
+        setting = str(c.get("convert_parallel", "auto"))
+        if setting != "auto":
+            return max(1, min(int(setting), mx))
+        if tray.on_battery():
+            return 1
+        n = min(self.AUTO_PARALLEL, mx)
+        if self.app.rec_tab.is_recording():
+            n = min(n, 2)
+        return n
+
+    def _waiting(self):
+        return [r for r in self.rows if r.status in ("czeka", "do wznowienia") and r not in self._claimed]
+
+    def _cores_now(self, c):
+        """Rdzenie dla każdej trwającej konwersji (sprawdzane co 0,5 s, także w trakcie pliku).
+        Automatycznie: jeden plik i nic nie czeka -> P (najszybciej); kilka -> wątki poza zapasem dla systemu
+        (na Intelu z P/E to rdzenie E); podczas nagrywania -> E."""
+        if c["convert_cores"] != "auto":
+            return c["convert_cores"]
+        if self.app.rec_tab.is_recording():
+            return "e" if engine.core_summary()[1] else "rest"
+        with self._lock:
+            many = self._active > 1 or bool(self._waiting())
+        return "rest" if many else "p"
+
+    def _live_text(self):
+        n = self._active
+        what = f"Konwertuję {n} pliki naraz" if 1 < n < 5 else f"Konwertuję {n} plików naraz" if n >= 5 else "Konwertuję"
+        kind = self._last_kind
+        return f"{what}…" + (f"   ·   rdzenie {CORE_NAMES.get(kind, kind)}" if kind else "")
+
     def _work(self):
+        """Koordynator: uruchamia osobny proces konwersji dla każdego pliku, najwyżej parallel_limit() naraz."""
         ui = self.app.ui
         c = dict(self.app.cfg)          # ustawienia z chwili startu
+        self._lock = threading.Lock()
+        self._claimed = set()
+        self._active = 0
+        self._last_kind = ""
+        threads = []
+        while True:
+            threads = [t for t in threads if t.is_alive()]
+            if self.cancel.is_set():
+                break
+            with self._lock:
+                waiting = self._waiting()
+                if not threads and not waiting:
+                    break
+                row = waiting[0] if waiting and len(threads) < self.parallel_limit(c) else None
+                if row:
+                    self._claimed.add(row)
+                    self._active += 1
+            if row:
+                t = threading.Thread(target=self._convert_one, args=(row, c), daemon=True)
+                threads.append(t)
+                t.start()
+                ui(lambda: self.running and self.live.configure(text=self._live_text()))
+            else:
+                time.sleep(0.3)
+        for t in threads:
+            t.join()
+        ui(self._finished)
+
+    def _convert_one(self, row, c):
+        ui = self.app.ui
         action = c["original_action"]
 
         def on_cores(kind, desc):
-            ui(lambda: self.running and self.live.configure(
-                text=f"Konwertuję…   ·   rdzenie {CORE_NAMES.get(kind, kind)}"))
+            self._last_kind = kind
+            ui(lambda: self.running and self.live.configure(text=self._live_text()))
 
-        while not self.cancel.is_set():
-            row = self.next_waiting()
-            if not row:
-                break
-            ui(lambda r=row: (r.set_status("w toku"), r.action.configure(state="disabled")))
-            level, denoise, _ = processing_plan(row.path, c["level_convert"], c["denoise_convert"])
-            try:
-                before = row.path.stat().st_size
-                dst = convproc.convert(
-                    row.path, opus_target(row.path, c["convert_out_dir"]), bitrate=c["convert_bitrate"],
-                    level=level, denoise=denoise,
-                    cores=c["convert_cores"], recording=self.app.rec_tab.is_recording, on_cores=on_cores,
-                    progress=lambda f, r=row: ui(lambda: r.set_progress(f)),
-                    cancel=self.cancel.is_set)
-                after = dst.stat().st_size
-                note = f"{fmt_size(before)} → {fmt_size(after)}"
-                if c["convert_out_dir"]:
-                    note += f"   ·   w „{dst.parent.name}”"
-                if action == "keep":
+        ui(lambda r=row: (r.set_status("w toku"), r.action.configure(state="disabled")))
+        level, denoise, _ = processing_plan(row.path, c["level_convert"], c["denoise_convert"])
+        try:
+            before = row.path.stat().st_size
+            dst = convproc.convert(
+                row.path, opus_target(row.path, c["convert_out_dir"]), bitrate=c["convert_bitrate"],
+                level=level, denoise=denoise,
+                cores=lambda: self._cores_now(c), on_cores=on_cores,
+                progress=lambda f, r=row: ui(lambda: r.set_progress(f)),
+                cancel=self.cancel.is_set)
+            after = dst.stat().st_size
+            note = f"{fmt_size(before)} → {fmt_size(after)}"
+            if c["convert_out_dir"]:
+                note += f"   ·   w „{dst.parent.name}”"
+            if action == "keep":
+                with self._lock:
                     self.potential += before - after
-                elif not converter.verify(row.path, dst):
-                    note += "   ·   długość się nie zgadza – oryginał zostawiony!"
-                elif action == "trash":
-                    try:
-                        to_recycle_bin(row.path)
+            elif not converter.verify(row.path, dst):
+                note += "   ·   długość się nie zgadza – oryginał zostawiony!"
+            elif action == "trash":
+                try:
+                    to_recycle_bin(row.path)
+                    with self._lock:
                         self.trashed += before - after
-                        note += "   ·   oryginał w Koszu"
-                    except OSError:
-                        log_exc(f"trash {row.path}")
-                        note += "   ·   nie udało się przenieść oryginału do Kosza – zostawiony"
-                else:
-                    row.path.unlink()
+                    note += "   ·   oryginał w Koszu"
+                except OSError:
+                    log_exc(f"trash {row.path}")
+                    note += "   ·   nie udało się przenieść oryginału do Kosza – zostawiony"
+            else:
+                row.path.unlink()
+                with self._lock:
                     self.saved_total += before - after
-                    note += "   ·   oryginał usunięty"
-                ui(lambda r=row, n=note, d=dst: self._row_done(r, n, d))
-            except InterruptedError:
-                ui(lambda r=row: (r.set_status("czeka"), r.set_progress(0), r.action.configure(state="normal")))
-                break
-            except Exception as e:
-                log_exc(f"convert {row.path}")
-                ui(lambda r=row, m=str(e): (r.set_status("błąd", m), r.action.configure(state="normal")))
-        ui(self._finished)
+                note += "   ·   oryginał usunięty"
+            ui(lambda r=row, n=note, d=dst: self._row_done(r, n, d))
+        except InterruptedError:
+            ui(lambda r=row: (r.set_status("czeka"), r.set_progress(0), r.action.configure(state="normal")))
+        except Exception as e:
+            log_exc(f"convert {row.path}")
+            ui(lambda r=row, m=str(e): (r.set_status("błąd", m), r.action.configure(state="normal")))
+        finally:
+            with self._lock:
+                self._active -= 1           # wiersz zostaje „zajęty” do końca tej serii – bez ponownych prób
+            ui(lambda: self.running and self.live.configure(text=self._live_text()))
 
     def _row_done(self, row, note, dst):
         row.set_status("gotowe", note)

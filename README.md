@@ -79,16 +79,23 @@ W **⚙ Opcje** zakładki ustawiasz:
 
 - **Jakość pliku** (24/32/48 kbps), niezależnie od jakości nagrywania.
 - **Wyrównanie głośności** i **usuwanie szumu**.
-- **Rdzenie CPU**: **Automatycznie** (domyślnie) to rdzenie E podczas nagrywania i P poza nim, z przełączaniem
-  w trakcie pliku. Można też wybrać na stałe **P**, **E** albo **Wszystkie**.
+- **Rdzenie CPU**: **Automatycznie** (domyślnie): jeden plik idzie na P, kilka naraz na wątki poza zapasem dla
+  systemu (u Intela to rdzenie E), a podczas nagrywania na E. Rdzenie przełączają się w trakcie pliku.
+  Można też wybrać na stałe **P**, **E** albo **Wszystkie**.
+- **Plików naraz**: **Automatycznie** to do 3 plików, podczas nagrywania do 2, na baterii 1.
+  Ręcznie można wybrać od 1 do liczby wątków procesora pomniejszonej o zapas dla systemu.
+  Zapas wynosi 1 wątek przy ≤ 4, 2 przy ≤ 8 i 4 przy większej liczbie. Każdy plik ma własny proces
+  o niskim priorytecie, więc praca na pierwszym planie nie zwalnia.
 - **Oryginał po konwersji**: zostaw, przenieś **do Kosza** (da się przywrócić) albo usuń na stałe.
   Przed usunięciem aplikacja sprawdza, czy długość nagrania się zgadza.
 - **Zapis wyniku**: obok oryginału albo do wybranego folderu. Istniejące pliki nie są nadpisywane,
   tylko dostają dopisek (2), (3)…
 
-Konwersja używa jednego wątku. Na i5-1345U nagranie 41 min z wyrównaniem i odszumianiem trwało ok. 1,5 min na P
-i ok. 3 min na E. „Wszystkie” nie przyspiesza. Rdzenie, wyrównanie i odszumianie dotyczą też przygotowania
-dźwięku przed transkrypcją.
+Jeden plik używa jednego wątku. Pomiar na i5-1345U (z zasilacza), nagranie 42,6 min z wyrównaniem
+i odszumianiem: 47 s na P i 105 s na E. Trzy pliki (126 min nagrań) naraz trwały 102 s na P i 119 s na E,
+a po kolei na P ok. 140 s. Więcej niż 3–4 naraz nie przyspiesza laptopa z limitem mocy, ale może
+przyspieszyć komputer stacjonarny. Rdzenie, wyrównanie i odszumianie dotyczą też przygotowania dźwięku
+przed transkrypcją.
 
 ## Prywatność
 
