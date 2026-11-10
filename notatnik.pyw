@@ -392,6 +392,7 @@ DEFAULTS = {
     "always_on_top": False,      # 📌 w nagłówku
     "tray": True,                # minimalizacja chowa okno do zasobnika
     "close_to_tray": False,      # krzyżyk chowa do zasobnika zamiast zamykać
+    "tray_always_visible": True, # ikona na pasku, nie w rozwijanym „^” (Windows 11)
     "autostart_minimized": True, # autostart: od razu schowany w zasobniku (sam autostart = wpis w rejestrze)
     "window_pos": None,          # [x, y] – gdzie było okno przy zamknięciu (ten sam monitor po starcie)
 }
@@ -2249,7 +2250,7 @@ class SettingsWindow(ctk.CTkToplevel):
         super().__init__(app)
         self.app = app
         self.title("Ustawienia aplikacji")
-        self.geometry("540x440")
+        self.geometry("540x470")
         self.resizable(False, False)
         place_dialog(self, app)
         self.grid_columnconfigure(1, weight=1)
@@ -2279,29 +2280,30 @@ class SettingsWindow(ctk.CTkToplevel):
         label("Zasobnik", 1, 14)
         self.tray = switch("minimalizuj do zasobnika (obok zegara)", cfg["tray"] and ok, 1, 14)
         self.close_tray = switch("krzyżyk też chowa do zasobnika", cfg["close_to_tray"] and ok, 2, 4)
+        self.visible = switch("ikona zawsze widoczna na pasku (nie w „^”)", cfg["tray_always_visible"] and ok, 3, 4)
         hint("Kliknięcie ikony przywraca okno, a w jej menu jest Nagrywaj i Zakończ." if ok else
-             "Ikona w zasobniku jest niedostępna (brak pakietu pystray).", 3)
+             "Ikona w zasobniku jest niedostępna (brak pakietu pystray).", 4)
 
-        label("Autostart", 4, 14)
-        self.autostart = switch("uruchamiaj razem z Windows", tray.autostart_enabled(), 4, 14, self._sync)
-        self.auto_min = switch("od razu schowana w zasobniku", cfg["autostart_minimized"] and ok, 5, 4)
-        hint("Tylko dla Twojego konta, bez uprawnień administratora.", 6)
+        label("Autostart", 5, 14)
+        self.autostart = switch("uruchamiaj razem z Windows", tray.autostart_enabled(), 5, 14, self._sync)
+        self.auto_min = switch("od razu schowana w zasobniku", cfg["autostart_minimized"] and ok, 6, 4)
+        hint("Tylko dla Twojego konta, bez uprawnień administratora.", 7)
 
         ctk.CTkLabel(self, text="Opcje nagrywania, transkrypcji i konwersji są w każdej zakładce "
                                 "pod przyciskiem ⚙ Opcje.",
                      text_color=MUTED, font=ctk.CTkFont(size=11), wraplength=490, justify="left"
-                     ).grid(row=7, column=0, columnspan=2, sticky="w", padx=18, pady=(10, 0))
+                     ).grid(row=8, column=0, columnspan=2, sticky="w", padx=18, pady=(10, 0))
         self.err = ctk.CTkLabel(self, text="", text_color=RED, font=ctk.CTkFont(size=11))
-        self.err.grid(row=8, column=0, columnspan=2, sticky="w", padx=18)
+        self.err.grid(row=9, column=0, columnspan=2, sticky="w", padx=18)
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.grid(row=9, column=0, columnspan=2, sticky="e", padx=18, pady=(6, 12))
+        btns.grid(row=10, column=0, columnspan=2, sticky="e", padx=18, pady=(6, 12))
         ctk.CTkButton(btns, text="Anuluj", width=90, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
                       command=self.destroy).pack(side="left", padx=6)
         ctk.CTkButton(btns, text="Zapisz", width=90, command=self._save).pack(side="left")
         if not ok:
-            for w in (self.tray, self.close_tray, self.auto_min):
+            for w in (self.tray, self.close_tray, self.visible, self.auto_min):
                 w.configure(state="disabled")
         self._sync()
 
@@ -2318,6 +2320,9 @@ class SettingsWindow(ctk.CTkToplevel):
             cfg["tray"] = bool(self.tray.get())
             cfg["close_to_tray"] = bool(self.close_tray.get())
             cfg["autostart_minimized"] = bool(self.auto_min.get())
+            cfg["tray_always_visible"] = bool(self.visible.get())
+            if cfg["tray_always_visible"]:
+                tray.promote_icon(APP_NAME)
         try:
             tray.set_autostart(bool(self.autostart.get()), minimized=ok and cfg["autostart_minimized"])
         except OSError as e:
@@ -2388,7 +2393,7 @@ class App(ctk.CTk):
         self._revealed = False
         self.tray = tray.Tray(APP_NAME, ICON_PATH, self.ui,
                               {"show": self.show_window, "toggle_rec": self._tray_toggle_rec, "quit": self.quit_app},
-                              self.rec_tab.is_recording)
+                              self.rec_tab.is_recording, always_visible=self.cfg["tray_always_visible"])
         self.bind("<Unmap>", self._on_unmap)
         if not (self.tray.ok and self.cfg["autostart_minimized"] and tray.TRAY_ARG in sys.argv):
             self.after(200, self._reveal)   # przy starcie z Windows zostaje w zasobniku do kliknięcia

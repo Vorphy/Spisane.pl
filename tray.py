@@ -120,12 +120,55 @@ def set_autostart(on, minimized=True):
                 pass
 
 
+# ── ikona zawsze widoczna (Windows 11) ───────────────────────────────────────
+_ICON_SETTINGS = r"Control Panel\NotifyIconSettings"
+
+
+def promote_icon(tooltip):
+    """Ikona na pasku zadań zamiast w rozwijanym menu „^”. Windows 11 pamięta to per ikona w
+    HKCU\\Control Panel\\NotifyIconSettings\\<id>\\IsPromoted (to samo, co przeciągnięcie ikony myszą).
+    Wpis powstaje dopiero po pierwszym pokazaniu ikony – stąd wywołanie po starcie.
+    Zwraca liczbę zmienionych wpisów."""
+    try:
+        import winreg
+    except ImportError:
+        return 0
+    changed = 0
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _ICON_SETTINGS) as root:
+            i = 0
+            while True:
+                try:
+                    name = winreg.EnumKey(root, i)
+                except OSError:
+                    break
+                i += 1
+                try:
+                    with winreg.OpenKey(root, name, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+                        def val(v):
+                            try:
+                                return winreg.QueryValueEx(k, v)[0]
+                            except OSError:
+                                return None
+                        exe = str(val("ExecutablePath") or "").lower()
+                        if val("InitialTooltip") != tooltip or "python" not in exe:
+                            continue
+                        if val("IsPromoted") != 1:
+                            winreg.SetValueEx(k, "IsPromoted", 0, winreg.REG_DWORD, 1)
+                            changed += 1
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return changed
+
+
 # ── ikona w zasobniku ────────────────────────────────────────────────────────
 class Tray:
     """Ikona w zasobniku (pystray we własnym wątku). Akcje wracają do wątku okna przez ui(fn).
     actions: {"show", "toggle_rec", "quit"}; is_recording() – do napisu w menu."""
 
-    def __init__(self, title, icon_path, ui, actions, is_recording):
+    def __init__(self, title, icon_path, ui, actions, is_recording, always_visible=True):
         self.ok = False
         self._ui, self._act, self._is_rec = ui, actions, is_recording
         try:
@@ -158,6 +201,13 @@ class Tray:
         self.icon = pystray.Icon(RUN_VALUE, base, title, menu)
         threading.Thread(target=self.icon.run, daemon=True).start()
         self.ok = True
+        if always_visible:
+            def promote():
+                import time
+                for delay in (2, 8):            # wpis w rejestrze Windows tworzy chwilę po pokazaniu ikony
+                    time.sleep(delay)
+                    promote_icon(title)
+            threading.Thread(target=promote, daemon=True).start()
 
     def update(self, tooltip, recording):
         if not self.ok:
