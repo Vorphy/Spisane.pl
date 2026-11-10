@@ -10,6 +10,7 @@ import ctypes
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -1994,6 +1995,8 @@ class RecordTab(ctk.CTkFrame):
         self.processing = set()            # ścieżki nagrań w trakcie obróbki (transkrypcja na nie czeka)
         self.post_cancel = threading.Event()
         self.post_threads = []
+        self.post_queue = []               # przerwane wcześniej nagrania do dokończenia (po kolei)
+        threading.Thread(target=self._find_unprocessed, daemon=True).start()
 
     def update_summary(self):
         c = self.app.cfg
@@ -2161,8 +2164,31 @@ class RecordTab(ctk.CTkFrame):
         self.post_threads = [x for x in self.post_threads if x.is_alive()] + [t]
         t.start()
 
+    def _find_unprocessed(self):
+        """Nagrania, których obróbkę przerwało zamknięcie aplikacji (surowe stereo bez znacznika)
+        – dokończ je po starcie, inaczej zostaje plik z Tobą w lewym, a rozmówcami w prawym kanale."""
+        try:
+            d = Path(self.app.cfg["save_dir"])
+            found = [f for f in sorted(d.glob("*.opus"))
+                     if re.fullmatch(r"\d{4}-\d\d-\d\d \d\d-\d\d-\d\d\.opus", f.name)
+                     and converter.channel_count(f) == 2 and not converter.read_processing(f)]
+        except Exception:
+            log_exc("szukanie nieobrobionych nagrań")
+            return
+        if found:
+            self.app.ui(lambda: self._resume_post(found))
+
+    def _resume_post(self, files):
+        files = [f for f in files if f != self.current_path() and f not in self.processing]
+        self.processing.update(files)       # transkrypcja poczeka na koniec obróbki
+        self.post_queue.extend(files)
+        if not any(t.is_alive() for t in self.post_threads):
+            self._post_process(self.post_queue.pop(0))
+
     def _post_done(self, path, err):
         self.processing.discard(path)
+        if self.post_queue and err != "stop":
+            self.after(10, lambda: self._post_process(self.post_queue.pop(0)))
         if err == "stop":
             return
         if err:
@@ -2364,13 +2390,13 @@ class App(ctk.CTk):
     def on_close(self):
         busy = []
         if self.rec_tab.is_recording():
-            busy.append("trwa nagrywanie (zostanie zatrzymane i zapisane)")
+            busy.append("trwa nagrywanie (zostanie zapisane, a obróbka dokończy się przy następnym uruchomieniu)")
         if self.tr_tab.busy:
             busy.append("trwa transkrypcja (stan zostanie zapisany do wznowienia)")
         if self.conv_tab.busy:
             busy.append("trwa konwersja (bieżący plik zostanie przerwany)")
         if self.rec_tab.processing:
-            busy.append("trwa obróbka nagrania (zostanie surowe nagranie)")
+            busy.append("trwa obróbka nagrania (dokończy się przy następnym uruchomieniu)")
         if busy and not messagebox.askyesno(APP_NAME, "Na pewno zamknąć?\n\n• " + "\n• ".join(busy), parent=self):
             return
         if self.rec_tab.is_recording():
