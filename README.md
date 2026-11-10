@@ -3,6 +3,10 @@
 Aplikacja na Windows do nagrywania rozmów (mikrofon + dźwięk z głośników, WASAPI loopback)
 do plików Opus, konwersji starych nagrań i kolejki transkrypcji.
 
+**Pełny podręcznik użytkownika:** [`podrecznik.html`](podrecznik.html). Opisuje każdą opcję, działanie silników
+i rdzeni procesora, pomiary i rozwiązywanie problemów. W aplikacji otwiera go przycisk **?** w nagłówku,
+klawisz **F1**, „Podręcznik” w menu ikony w zasobniku albo **?** w każdym oknie Opcji (od właściwego rozdziału).
+
 ## Uruchomienie na nowym komputerze
 
 1. Sklonuj repo albo pobierz ZIP.
@@ -32,6 +36,7 @@ Test na nagraniu z ręczną transkrypcją (5,8 min, Intel Iris Xe, ze słownikie
 | Grafika Intel (OpenVINO) | 22,6% | 12,6% | 59 s |
 | Grafika Vulkan (whisper.cpp, beam 2) | 24,1% | 12,2% | 65 s |
 | Procesor (beam 2, rdzenie P) | 24,4% | 13,4% | 184 s |
+
 - Formaty txt (z czasem albo bez), srt, vtt albo wszystkie naraz; filtr VAD; przycinanie do zadanego czasu.
 - **Zatrzymaj** zapisuje stan, a **Transkrybuj** wznawia od tego miejsca, także po ponownym uruchomieniu aplikacji.
 - **Monitor folderu**: nowe nagrania same trafiają do kolejki, gdy skończy się ich zapis

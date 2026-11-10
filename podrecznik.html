@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notatnik spotkań – podręcznik</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1f2328; --muted: #5b6470; --line: #e3e6ea; --card: #f5f7f9;
+  --accent: #2563eb; --accent-bg: #e8effd; --warn: #b45309; --warn-bg: #fff5e6; --ok: #2f9e62;
+  --code: #f0f2f5; --side: #fafbfc;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17191c; --fg: #e6e8eb; --muted: #9aa3ad; --line: #2c3036; --card: #20242a;
+    --accent: #7aa7ff; --accent-bg: #1d2a44; --warn: #fbbf24; --warn-bg: #2d2412; --ok: #3dd68c;
+    --code: #262a31; --side: #1b1e22;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif; }
+a { color: var(--accent); }
+.layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: 100vh; }
+nav { position: sticky; top: 0; height: 100vh; overflow-y: auto; padding: 24px 18px;
+  background: var(--side); border-right: 1px solid var(--line); font-size: 14.5px; }
+nav .brand { font-weight: 700; font-size: 16px; margin-bottom: 4px; }
+nav .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+nav ol { list-style: none; padding: 0; margin: 0; counter-reset: ch; }
+nav li { margin: 2px 0; }
+nav a { display: block; padding: 4px 8px; border-radius: 6px; text-decoration: none; color: var(--fg); }
+nav a:hover { background: var(--accent-bg); }
+nav ol ol { padding-left: 12px; font-size: 13.5px; }
+nav ol ol a { color: var(--muted); }
+main { padding: 32px 48px 80px; max-width: 920px; }
+h1 { font-size: 30px; margin: 0 0 6px; }
+h2 { font-size: 23px; margin: 48px 0 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+h3 { font-size: 18px; margin: 28px 0 6px; }
+h4 { font-size: 16px; margin: 18px 0 4px; }
+.lead { color: var(--muted); font-size: 17px; margin-top: 0; }
+code, kbd { font-family: Consolas, "Cascadia Mono", monospace; font-size: 14px; }
+code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--card); }
+pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-height: 1.35; font-size: 13.5px; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0 16px; font-size: 15px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { background: var(--card); font-weight: 600; }
+.opt { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.opt b.name { display: block; }
+.opt .def { color: var(--muted); font-size: 14px; }
+.note, .warn, .tip { padding: 10px 14px; border-radius: 8px; margin: 12px 0; }
+.note { background: var(--accent-bg); }
+.tip { background: var(--card); border-left: 4px solid var(--ok); }
+.warn { background: var(--warn-bg); border-left: 4px solid var(--warn); }
+.steps { counter-reset: s; list-style: none; padding: 0; }
+.steps li { counter-increment: s; position: relative; padding-left: 38px; margin: 10px 0; }
+.steps li::before { content: counter(s); position: absolute; left: 0; top: 1px; width: 26px; height: 26px;
+  border-radius: 50%; background: var(--accent); color: #fff; font-weight: 700; font-size: 14px;
+  display: flex; align-items: center; justify-content: center; }
+.top { font-size: 13px; float: right; margin-top: -30px; }
+@media (max-width: 860px) {
+  .layout { display: block; }
+  nav { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  main { padding: 20px 16px 60px; }
+}
+@media print {
+  nav { display: none; } .layout { display: block; } main { max-width: none; padding: 0; }
+  h2 { page-break-before: always; } .top { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav aria-label="Spis treści">
+  <div class="brand">Notatnik spotkań</div>
+  <div class="sub">Podręcznik użytkownika · Spisane.pl</div>
+  <ol>
+    <li><a href="#start">1. Szybki start</a></li>
+    <li><a href="#okno">2. Okno aplikacji</a></li>
+    <li><a href="#nagrywanie">3. Nagrywanie</a>
+      <ol>
+        <li><a href="#nagr-jak">Jak nagrywać</a></li>
+        <li><a href="#nagr-obrobka">Co dzieje się po nagraniu</a></li>
+        <li><a href="#nagr-opcje">Opcje nagrywania</a></li>
+      </ol></li>
+    <li><a href="#transkrypcja">4. Transkrypcja</a>
+      <ol>
+        <li><a href="#tr-kolejka">Kolejka i wyniki</a></li>
+        <li><a href="#tr-opcje">Opcje transkrypcji</a></li>
+        <li><a href="#tr-slownik">Słownik nazw</a></li>
+      </ol></li>
+    <li><a href="#konwersja">5. Konwersja</a>
+      <ol>
+        <li><a href="#konw-opcje">Opcje konwersji</a></li>
+        <li><a href="#konw-naraz">Kilka plików naraz</a></li>
+      </ol></li>
+    <li><a href="#ustawienia">6. Ustawienia aplikacji</a></li>
+    <li><a href="#silniki">7. Jak to działa: silniki rozpoznawania mowy</a></li>
+    <li><a href="#procesor">8. Jak to działa: procesor, rdzenie, praca w tle</a></li>
+    <li><a href="#wydajnosc">9. Wydajność – pomiary</a></li>
+    <li><a href="#pliki">10. Pliki i foldery</a></li>
+    <li><a href="#prywatnosc">11. Prywatność</a></li>
+    <li><a href="#problemy">12. Rozwiązywanie problemów</a></li>
+    <li><a href="#slowniczek">13. Słowniczek</a></li>
+  </ol>
+</nav>
+
+<main>
+<h1>Notatnik spotkań</h1>
+<p class="lead">Aplikacja na Windows do nagrywania rozmów (np. w Teams), zamiany ich na tekst i kompresji starych nagrań.
+Wszystko działa na Twoim komputerze – nagrania i transkrypcje nie wychodzą do internetu.</p>
+
+<pre>
+  🎙 Twój mikrofon ─┐
+                    ├─► NAGRYWANIE ─► obróbka po nagraniu ─► plik .opus ─┐
+  🔊 Rozmówcy ──────┘   (2 kanały)    (szum, głośność,                   │
+     (dźwięk z głośników)              oddechy)                          ▼
+                                                                  TRANSKRYPCJA ─► tekst .txt / napisy .srt .vtt
+  🎬 Stare nagrania (MP4 z OBS, MP3…) ─► KONWERSJA ─► mały plik .opus ──┘
+</pre>
+
+<p>Aplikacja ma trzy zakładki, które odpowiadają tym trzem zadaniom: <b>Nagrywanie</b>, <b>Transkrypcja</b> i <b>Konwersja</b>.
+Każda ma własny przycisk <b>⚙</b> z opcjami. Ten podręcznik otworzysz w każdej chwili przyciskiem <b>?</b> w nagłówku okna
+albo klawiszem <kbd>F1</kbd>.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="start">1. Szybki start</h2>
+<h3>Instalacja</h3>
+<ol class="steps">
+  <li>Pobierz aplikację (folder z plikami, np. ZIP z GitHuba) i rozpakuj w dowolnym miejscu.</li>
+  <li>Kliknij dwukrotnie <code>uruchom.bat</code>. Jeśli na komputerze nie ma Pythona, skrypt zaproponuje instalację
+      Pythona 3.12 (przez <code>winget</code>, tylko dla Twojego konta).</li>
+  <li>Przy pierwszym starcie aplikacja sprawdzi brakujące pakiety, pokaże ich listę i po Twojej zgodzie je doinstaluje.
+      Pakiety do transkrypcji to kilkaset MB – możesz je pominąć, wtedy działa nagrywanie i konwersja.</li>
+</ol>
+<div class="note">Na firmowym komputerze <code>winget</code> bywa zablokowany. Wtedy zainstaluj Pythona 3.12 ręcznie
+z python.org i zaznacz „Add python.exe to PATH”.</div>
+
+<h3>Pierwsze nagranie i transkrypcja</h3>
+<ol class="steps">
+  <li>W zakładce <b>Nagrywanie</b> wybierz mikrofon (🎙) i głośniki/słuchawki (🔊), przez które słyszysz rozmówców.</li>
+  <li>Kliknij <b>Sprawdź poziomy (10 s)</b> i powiedz coś – pasek mikrofonu powinien się ruszać. Puść dowolny dźwięk – ruszy się pasek głośników.</li>
+  <li>Kliknij <b>● Nagrywaj</b> (albo <kbd>Ctrl</kbd>+<kbd>R</kbd>). Po spotkaniu – <b>■ Zatrzymaj</b>.</li>
+  <li>Poczekaj, aż obróbka się skończy (status „Zapisano i obrobiono ✓”, zwykle 1–4 minuty na godzinę nagrania).</li>
+  <li>Kliknij <b>Do transkrypcji</b>, przejdź do zakładki <b>Transkrypcja</b> i kliknij <b>▶ Transkrybuj</b>.
+      Pierwsza transkrypcja pobiera model rozpoznawania mowy (ok. 1–1,5 GB) – kolejne startują w kilka sekund.</li>
+</ol>
+<div class="tip">Ustawienia domyślne są dobrane na podstawie testów i w większości przypadków nie trzeba ich zmieniać.</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="okno">2. Okno aplikacji</h2>
+<table>
+  <tr><th>Element</th><th>Co robi</th></tr>
+  <tr><td><b>?</b> (nagłówek)</td><td>Otwiera ten podręcznik. To samo robi <kbd>F1</kbd>.</td></tr>
+  <tr><td><b>📌</b> (nagłówek)</td><td>Okno zawsze na wierzchu – nad innymi oknami (np. nad Teams). Kliknij jeszcze raz, żeby wyłączyć. Aplikacja to zapamiętuje.</td></tr>
+  <tr><td><b>⚙</b> (nagłówek)</td><td>Ustawienia całej aplikacji: wygląd, zasobnik, autostart – <a href="#ustawienia">rozdział 6</a>.</td></tr>
+  <tr><td><b>⚙</b> w zakładce</td><td>Opcje danej zakładki. Pod listą plików widać ich skrót – kliknięcie w niego też otwiera opcje.</td></tr>
+  <tr><td>Ikona w zasobniku (obok zegara)</td><td>Kliknięcie przywraca okno. Menu (prawy przycisk): Pokaż okno, ● Nagrywaj / ■ Zatrzymaj nagrywanie, Podręcznik, Zakończ.
+      Podczas nagrywania ikona ma czerwoną kropkę, a po najechaniu myszą pokazuje czas nagrania albo trwającą pracę.</td></tr>
+</table>
+<h3>Skróty klawiszowe</h3>
+<table>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Nagrywaj / zatrzymaj nagrywanie</td></tr>
+  <tr><td><kbd>F1</kbd></td><td>Podręcznik</td></tr>
+</table>
+<h3>Okno i monitory</h3>
+<p>Okno dopasowuje skalę do monitora, na którym jest (także w trakcie przeciągania między monitorami o różnym powiększeniu),
+i po ponownym uruchomieniu wraca na ten sam monitor, jeśli nadal jest podłączony.</p>
+<h3>Jedna kopia aplikacji</h3>
+<p>Aplikacja działa zawsze w jednej kopii. Jeśli uruchomisz ją drugi raz (np. gdy już działa z autostartu), pokaże się okno działającej kopii.
+Dzięki temu nigdy nie nagrywają dwie naraz.</p>
+<div class="warn"><b>Ważne przy aktualizacji:</b> żeby wczytać nową wersję, zamknij aplikację przez <b>Zakończ</b> w menu ikony w zasobniku
+(albo krzyżykiem, jeśli nie chowa do zasobnika) i uruchom ponownie. Samo kliknięcie <code>uruchom.bat</code> przy działającej aplikacji pokaże tylko starą kopię.</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="nagrywanie">3. Nagrywanie</h2>
+<p>Nagrywa jednocześnie <b>Twój mikrofon</b> i <b>dźwięk z głośników lub słuchawek</b> (czyli rozmówców z Teams, Zooma, przeglądarki).
+Działa z każdym komunikatorem, bo nagrywa to, co słyszysz, a nie samą aplikację. Nie potrzebuje żadnej wtyczki ani zgody w Teams.</p>
+
+<h3 id="nagr-jak">Jak nagrywać</h3>
+<table>
+  <tr><th>Element</th><th>Co robi</th></tr>
+  <tr><td>🎙 lista</td><td>Mikrofon. Wybierz ten sam, którego używasz w Teams.</td></tr>
+  <tr><td>🔊 lista</td><td>Urządzenie, przez które słyszysz rozmówców (słuchawki, głośniki, zestaw USB). Jeśli wybierzesz inne niż to, na którym gra Teams – rozmówców nie będzie w nagraniu.</td></tr>
+  <tr><td>Paski poziomu</td><td>Głośność obu źródeł na żywo. Pasek głośników jest pusty, gdy nic nie gra – to normalne.</td></tr>
+  <tr><td><b>Sprawdź poziomy (10 s)</b></td><td>Otwiera mikrofon na 10 sekund bez nagrywania – do sprawdzenia, czy wszystko działa.</td></tr>
+  <tr><td><b>● Nagrywaj / ■ Zatrzymaj</b></td><td>Start i koniec nagrania. Licznik pokazuje czas, a tytuł okna i ikona w zasobniku – że trwa nagrywanie.</td></tr>
+  <tr><td><b>Do transkrypcji</b></td><td>Po nagraniu: dodaje plik do kolejki w zakładce Transkrypcja.</td></tr>
+  <tr><td><b>Pokaż plik</b></td><td>Otwiera folder z nagraniem.</td></tr>
+</table>
+<p>Nagrania zapisują się w <b>folderze nagrań</b> (domyślnie <code>Wideo</code> / <code>Videos</code>) pod nazwą z datą i godziną,
+np. <code>2026-11-10 15-04-54.opus</code>. Plik jest zapisywany na bieżąco – nawet przy awarii prądu zostaje nagranie do tej chwili.</p>
+<div class="note">Mikrofon jest współdzielony – nagrywanie nie blokuje go dla Teams. Aplikacja otwiera mikrofon tylko podczas
+nagrywania i sprawdzania poziomów; poza tym go nie dotyka.</div>
+
+<h3 id="nagr-obrobka">Co dzieje się po nagraniu</h3>
+<p>Podczas nagrywania mikrofon i rozmówcy trafiają do <b>dwóch osobnych kanałów</b> (lewy – Ty, prawy – rozmówcy).
+Po zatrzymaniu aplikacja obrabia każdy kanał osobno i dopiero potem łączy je w jeden plik mono:</p>
+<pre>
+ kanał 🎙 Ty ─────► usuwanie szumu ─► wyrównanie głośności ─► bramka mowy (bez oddechów) ─┐
+                                                                                          ├─► miks ─► plik .opus
+ kanał 🔊 rozmówcy ► usuwanie szumu ─► wyrównanie głośności ──────────────────────────────┘
+</pre>
+<ul>
+  <li><b>Osobna obróbka</b> sprawia, że cichy rozmówca nie ginie pod głośnym, a szum z Twojego mikrofonu jest usuwany bez psucia głosu rozmówców.</li>
+  <li><b>Bramka mowy</b> (model wykrywania mowy Silero) wycisza Twój mikrofon, gdy nie mówisz – znikają oddechy, siorbanie, stukanie w klawiaturę, szelesty.
+      Zostawia 0,16 s przed i 0,3 s po każdej wypowiedzi, żeby nie ucinać słów.</li>
+  <li>Obrobiony plik <b>zastępuje surowy</b> (chyba że włączysz zachowywanie surowego nagrania).</li>
+  <li>Plik dostaje w metadanych <b>znacznik obróbki</b> (co zrobiono i kiedy). Transkrypcja i konwersja go widzą i nie obrabiają drugi raz.</li>
+</ul>
+<p>Obróbka trwa zwykle 1–4 minuty na godzinę nagrania i działa w tle – możesz od razu nagrywać dalej.
+Status widać pod przyciskiem nagrywania („Teraz wyrównuję głośność, usuwam szum, wyciszam oddechy… 45%”).</p>
+<div class="tip">Jeśli zamkniesz aplikację w trakcie obróbki, nic nie przepada: przy następnym uruchomieniu aplikacja sama
+znajdzie nieobrobione nagranie i dokończy pracę.</div>
+
+<h3 id="nagr-opcje">Opcje nagrywania (Nagrywanie → ⚙)</h3>
+<div class="opt"><b class="name">Folder nagrań</b>Gdzie zapisują się nowe nagrania. <span class="def">Domyślnie: Wideo (Videos).</span></div>
+<div class="opt"><b class="name">Jakość nagrania</b>24, 32 albo 48 kbps (Opus). Ok. 11 / 14 / 22 MB na godzinę.
+  32 kbps w zupełności wystarcza do mowy i do transkrypcji. <span class="def">Domyślnie: 32 kbps.</span></div>
+<div class="opt"><b class="name">Po nagraniu: wyrównaj głośność</b>Cisi rozmówcy podgłośnieni, głośni ściszeni – osobno dla Ciebie i dla rozmówców,
+  z wyprzedzeniem (aplikacja zna całe nagranie, więc wyrównuje dokładniej niż na żywo). Nie podgłaśnia szumu w przerwach. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">Po nagraniu: usuń szum tła</b>Filtr buczenia (poniżej ok. 80 Hz) i bramka widmowa: uczy się szumu z przerw w mowie i odejmuje go
+  (najwyżej o 15 dB, żeby głos nie brzmiał metalicznie). Osobno dla każdego kanału. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">Po nagraniu: wycisz mój mikrofon, gdy nie mówię</b>Bramka mowy opisana wyżej – usuwa z Twojej ścieżki oddechy, siorbanie,
+  stukanie. Rozmówców nie dotyka. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">Zapasowo: wyrównuj na żywo</b>Lekkie wyrównywanie głośności już w trakcie nagrywania. Używane tylko wtedy, gdy wyłączysz
+  wyrównywanie po nagraniu (wtedy przełącznik jest aktywny). <span class="def">Domyślnie: włączone, ale nieużywane.</span></div>
+<div class="opt"><b class="name">Zachowaj surowe nagranie w podfolderze „surowe”</b>Kopia nagrania sprzed obróbki (stereo: Ty po lewej, rozmówcy po prawej).
+  Przydatne, gdyby obróbka coś zepsuła. Zajmuje ok. 2× więcej miejsca. <span class="def">Domyślnie: wyłączone.</span></div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="transkrypcja">4. Transkrypcja</h2>
+<p>Zamienia nagrania na tekst modelem <b>Whisper</b> (domyślnie <code>large-v3-turbo</code> – jakość dużego modelu przy dużej szybkości).
+Działa całkowicie na Twoim komputerze, bez internetu (internet jest potrzebny tylko raz, do pobrania modelu).</p>
+
+<h3 id="tr-kolejka">Kolejka i wyniki</h3>
+<table>
+  <tr><th>Element</th><th>Co robi</th></tr>
+  <tr><td><b>＋ Pliki</b> / <b>＋ Folder</b></td><td>Dodaje nagrania do kolejki (każdy format audio i wideo: opus, mp3, m4a, wav, mp4, mkv…).</td></tr>
+  <tr><td><b>Wyczyść</b></td><td>Usuwa z listy pliki już zrobione.</td></tr>
+  <tr><td>Pole <b>✂ przytnij</b> przy pliku</td><td>Transkrybuje tylko początek nagrania: wpisz minuty (np. <code>45</code>) albo czas <code>01:15:00</code>.
+      Przydatne, gdy nagranie trwało dłużej niż spotkanie.</td></tr>
+  <tr><td><b>▶ Transkrybuj</b></td><td>Start kolejki. Pliki idą po kolei; postęp widać przy każdym pliku, a bieżący tekst pod listą.</td></tr>
+  <tr><td><b>■ Zatrzymaj</b></td><td>Przerywa i <b>zapisuje stan</b>. Kolejne „Transkrybuj” wznowi od tego miejsca – także po ponownym uruchomieniu aplikacji.</td></tr>
+  <tr><td><b>Monitoruj folder</b></td><td>Pilnuje wybranego folderu: każde nowe nagranie samo trafia do kolejki, gdy skończy się jego zapis
+      (np. nagranie z zakładki Nagrywanie albo z OBS). Nagrania w trakcie obróbki czekają na jej koniec.</td></tr>
+</table>
+<p><b>Wyniki:</b> po transkrypcji oryginał i pliki z tekstem trafiają do podfolderu <code>przetworzone</code> obok nagrania
+(np. <code>przetworzone\2026-11-10 15-04-54.txt</code>). Tekst zapisuje się na bieżąco, więc część wyniku widać jeszcze przed końcem.</p>
+
+<h3 id="tr-opcje">Opcje transkrypcji (Transkrypcja → ⚙)</h3>
+<div class="opt"><b class="name">Model Whispera</b>Od <code>tiny</code> (najszybszy, najsłabszy) do <code>large-v3</code>. <code>large-v3-turbo</code> daje jakość dużego modelu
+  kilka razy szybciej – to najlepszy wybór dla polskiego. <span class="def">Domyślnie: large-v3-turbo.</span></div>
+<div class="opt"><b class="name">Język</b>Kod języka nagrania (pl, en, de…). Podanie języka jest dokładniejsze niż zgadywanie. <span class="def">Domyślnie: pl.</span></div>
+<div class="opt"><b class="name">Urządzenie</b>Na czym liczy się transkrypcja – szczegóły w <a href="#silniki">rozdziale 7</a>. Pod przyciskami widać wykrytą kartę graficzną.
+  <ul>
+    <li><b>Automatycznie</b> – karta Intel → Grafika Intel; inna karta (AMD, NVIDIA) → Grafika Vulkan; brak karty → Procesor.</li>
+    <li><b>Grafika Intel</b> (OpenVINO) – najszybsza i najdokładniejsza na komputerach z grafiką Intel.</li>
+    <li><b>Grafika Vulkan</b> (whisper.cpp) – każda grafika: AMD Radeon, Intel, NVIDIA. Za pierwszym razem pobiera program i model (ok. 0,9 GB).</li>
+    <li><b>Procesor</b> (faster-whisper) – działa wszędzie, ok. 3× wolniej niż grafika.</li>
+    <li><b>NVIDIA</b> (CUDA) – karty GeForce/RTX; brakujące biblioteki aplikacja zaproponuje doinstalować.</li>
+  </ul>
+  Gdy wybrana grafika nie działa, transkrypcja sama przechodzi na procesor i pokazuje to pod listą. <span class="def">Domyślnie: Automatycznie.</span></div>
+<div class="opt"><b class="name">Typ obliczeń</b>Dokładność liczb w modelu na procesorze/NVIDIA: <code>int8</code> – najszybszy na procesorze; <code>float16</code> – dla kart NVIDIA.
+  Przy grafice Intel i Vulkan ustalony na stałe (int8 / q8_0). <span class="def">Domyślnie: int8.</span></div>
+<div class="opt"><b class="name">Beam size</b>Ile wariantów zdania model porównuje naraz. Więcej = trochę dokładniej, ale wolniej.
+  Grafika Intel: zawsze 1 (OpenVINO nie obsługuje więcej na grafice), Vulkan: 2. <span class="def">Domyślnie: 2 (procesor).</span></div>
+<div class="opt"><b class="name">Wątki CPU</b>Ile wątków procesora używa transkrypcja na procesorze. Dla rdzeni P najlepiej 4. <span class="def">Domyślnie: 8.</span></div>
+<div class="opt"><b class="name">Rdzenie</b>Na których rdzeniach liczy proces transkrypcji (procesory Intel z rdzeniami P i E – <a href="#procesor">rozdział 8</a>):
+  E – energooszczędne, zostawiają P dla innych programów; P – wydajne, szybciej; wszystkie; pierwsze N. <span class="def">Domyślnie: E.</span></div>
+<div class="opt"><b class="name">Format</b><code>txt</code> – tekst; <code>srt</code> / <code>vtt</code> – napisy do wideo; <code>all</code> – wszystkie naraz. <span class="def">Domyślnie: txt.</span></div>
+<div class="opt"><b class="name">Timestampy</b>Znaczniki czasu w pliku txt, np. <code>[12.3s]</code> – ułatwiają odszukanie miejsca w nagraniu. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">VAD</b>Filtr ciszy: model dostaje tylko fragmenty z mową, więc nie „zmyśla” tekstu w ciszy i działa szybciej.
+  Dodatkowo aplikacja sprawdza miejsca, gdzie VAD słyszy mowę, a model nic nie napisał, i transkrybuje je ponownie. <span class="def">Domyślnie: włączony – zalecany.</span></div>
+<div class="opt"><b class="name">Słownik nazw</b>Lista nazw własnych podpowiadana modelowi – <a href="#tr-slownik">niżej</a>.</div>
+<div class="opt"><b class="name">Przed transkrypcją: wyrównaj głośność / usuń szum tła</b>Obróbka na kopii pliku przed transkrypcją (oryginał zostaje bez zmian).
+  Przydaje się przy starych nagraniach. Pliki już obrobione (np. nagrania z aplikacji) aplikacja rozpozna i nie obrobi drugi raz – pokaże to przy pliku. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">Podczas nagrywania: nie zaczynaj nowego pliku</b>Gdy trwa nagrywanie, rozpoczęty plik dokończy się normalnie, a kolejne poczekają na koniec nagrania.
+  Chroni nagrywanie przed obciążeniem komputera. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">Monitor folderu</b>Który folder obserwuje przełącznik „Monitoruj folder”. <span class="def">Domyślnie: Wideo (Videos).</span></div>
+
+<h3 id="tr-slownik">Słownik nazw</h3>
+<p>Whisper dobrze zna zwykłe słowa, ale nazwy własne (systemy, projekty, nazwiska) często przekręca – np. „Kafka” jako „kawkę”.
+W słowniku wpisujesz takie nazwy po przecinku. Model dostaje je jako podpowiedź do każdego fragmentu nagrania.</p>
+<ul>
+  <li>Limit to <b>223 tokeny</b> (ok. 150–200 krótkich nazw) – licznik pod polem pokazuje, ile zostało. Powyżej limitu zapis jest zablokowany.</li>
+  <li>W teście słownik zmniejszył liczbę błędów o ok. 3 punkty procentowe i poprawił nazwy z 2 do 8 na 9, bez wstawiania nazw, których nikt nie powiedział.</li>
+  <li>Nie dopisuj odmian (Kafki, Kafkę) – nic to nie daje. Przełącznikiem wyłączysz słownik bez kasowania listy.</li>
+  <li>Lista zapisuje się tylko w ustawieniach na tym komputerze (<code>config.json</code>), nigdy w repozytorium.</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="konwersja">5. Konwersja</h2>
+<p>Zamienia nagrania w dowolnym formacie (np. duże MP4 z OBS, MP3, WAV, M4A) na małe pliki Opus – zwykle kilkadziesiąt razy mniejsze.
+Z plików wideo zostaje tylko dźwięk. Opcjonalnie wyrównuje głośność i usuwa szum. Dodawanie plików, kolejka i przyciski działają jak w Transkrypcji.</p>
+<p>Po konwersji pod listą widać, ile miejsca odzyskano (albo odzyskasz po usunięciu oryginałów).</p>
+
+<h3 id="konw-opcje">Opcje konwersji (Konwersja → ⚙)</h3>
+<div class="opt"><b class="name">Jakość pliku</b>24 / 32 / 48 kbps – niezależnie od jakości nagrywania (np. stare MP4 można mocniej skompresować). <span class="def">Domyślnie: 32 kbps.</span></div>
+<div class="opt"><b class="name">Wyrównanie głośności</b>Cisi rozmówcy podgłośnieni. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">Usuwanie szumu</b>Filtr buczenia i bramka szumu tła. Obie opcje wydłużają konwersję ok. 2–3×, ale wciąż trwa ona minuty, nie godziny. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">Rdzenie CPU</b>
+  <ul>
+    <li><b>Automatycznie</b> – jeden plik: rdzenie P (najszybciej); kilka plików naraz: wątki poza zapasem dla systemu (u Intela – rdzenie E);
+        podczas nagrywania: E. Przełącza się w trakcie pliku (np. ostatni plik w kolejce przechodzi na P).</li>
+    <li><b>P</b> – najszybciej, ale konkuruje z aplikacjami na pierwszym planie. <b>E</b> – wolniej, rdzenie P zostają wolne. <b>Wszystkie</b> – Windows sam przydziela.</li>
+  </ul>
+  Ustawienie dotyczy też przygotowania dźwięku przed transkrypcją. <span class="def">Domyślnie: Automatycznie.</span></div>
+<div class="opt"><b class="name">Plików naraz</b>Ile plików konwertować jednocześnie – <a href="#konw-naraz">niżej</a>. <span class="def">Domyślnie: Automatycznie.</span></div>
+<div class="opt"><b class="name">Oryginał po konwersji</b><b>Zostaw</b> – nic nie usuwa; <b>Do Kosza</b> – można przywrócić; <b>Usuń na stałe</b> – bez Kosza (aplikacja zapyta przed startem).
+  Zanim usunie oryginał, sprawdza, czy długość nagrania się zgadza – jeśli nie, oryginał zostaje. <span class="def">Domyślnie: Zostaw.</span></div>
+<div class="opt"><b class="name">Zapis wyniku</b>Obok oryginału albo do wybranego folderu. Istniejące pliki nie są nadpisywane – nowy dostaje dopisek (2), (3)… <span class="def">Domyślnie: obok oryginału.</span></div>
+
+<h3 id="konw-naraz">Kilka plików naraz</h3>
+<p>Jeden plik zajmuje jeden wątek procesora. Przy kilku plikach w kolejce aplikacja może konwertować kilka jednocześnie, każdy w osobnym procesie.</p>
+<ul>
+  <li><b>Zapas dla systemu:</b> część wątków procesora jest zawsze zostawiana dla Windows i Twojej pracy – 1 wątek przy procesorach do 4 wątków,
+      2 przy do 8, 4 przy większych. Konwersje kilku plików liczą tylko na pozostałych. Opis w opcjach pokazuje, ile wątków ma ten komputer i ile zostaje.</li>
+  <li><b>Automatycznie:</b> do 3 plików naraz; podczas nagrywania najwyżej 2; na baterii 1 (żeby nie rozładować laptopa).</li>
+  <li><b>Ręcznie:</b> od 1 do liczby wątków poza zapasem. Na laptopie więcej niż 3–4 zwykle nie przyspiesza (limit mocy procesora),
+      na komputerze stacjonarnym może.</li>
+  <li><b>Zatrzymaj</b> przerywa wszystkie naraz; przerwane pliki wracają do kolejki i przy kolejnym starcie zaczną się od nowa.</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="ustawienia">6. Ustawienia aplikacji (⚙ w nagłówku)</h2>
+<div class="opt"><b class="name">Wygląd</b>Systemowy (jak Windows), Jasny albo Ciemny. <span class="def">Domyślnie: Systemowy.</span></div>
+<div class="opt"><b class="name">Minimalizuj do zasobnika</b>Minimalizacja chowa okno do ikony obok zegara zamiast na pasek zadań. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">Krzyżyk też chowa do zasobnika</b>Zamknięcie okna krzyżykiem tylko je chowa; aplikację zamykasz przez <b>Zakończ</b> w menu ikony.
+  Przydatne, gdy aplikacja ma działać cały dzień. <span class="def">Domyślnie: wyłączone.</span></div>
+<div class="opt"><b class="name">Ikona zawsze widoczna na pasku</b>Windows 11 chowa nowe ikony w rozwijane menu „^”. Ta opcja wyciąga ikonę Notatnika na pasek
+  (tak, jakby przeciągnąć ją myszą). Wyłącz, jeśli wolisz ją w „^”. <span class="def">Domyślnie: włączone.</span></div>
+<div class="opt"><b class="name">Uruchamiaj razem z Windows</b>Autostart przy logowaniu – wpis tylko dla Twojego konta, bez uprawnień administratora. <span class="def">Domyślnie: wyłączone.</span></div>
+<div class="opt"><b class="name">Od razu schowana w zasobniku</b>Przy autostarcie okno się nie pokazuje – aplikacja czeka w zasobniku. <span class="def">Domyślnie: włączone.</span></div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="silniki">7. Jak to działa: silniki rozpoznawania mowy</h2>
+<p>Zawsze działa ten sam model – <b>Whisper</b>. Różni się tylko „silnik”, który go uruchamia, i to, na czym liczy (grafika czy procesor).
+Niezależnie od silnika plik przechodzi te same kroki:</p>
+<pre>
+ nagranie ─► przygotowanie dźwięku (opcjonalnie: głośność, szum; pomijane, jeśli już było)
+         ─► wykrywanie mowy (VAD) – gdzie jest mowa, a gdzie cisza
+         ─► SILNIK WHISPER: dźwięk + słownik nazw ─► tekst z czasami
+         ─► kontrola pominięć (fragment z mową bez tekstu = jeszcze raz)
+         ─► zapis na bieżąco (txt / srt / vtt) + stan do wznowienia
+</pre>
+<table>
+  <tr><th>Silnik</th><th>Liczy na</th><th>Kiedy</th><th>Jak działa</th></tr>
+  <tr><td><b>Grafika Intel</b><br>OpenVINO</td><td>zintegrowana grafika Intel (Iris Xe, Arc)</td><td>komputery z grafiką Intel – najlepszy wybór</td>
+      <td>Biblioteka Intela zoptymalizowana pod jego grafiki. Mowa dzielona na porcje do 28 s cięte w ciszy (Whisper „widzi” 30 s naraz – dłuższe porcje gubiły zdania).
+      Beam 1. Model int8 (ok. 0,8 GB), przy pierwszym starcie kompilowany pod grafikę (kilka minut, potem w pamięci podręcznej).</td></tr>
+  <tr><td><b>Grafika Vulkan</b><br>whisper.cpp</td><td>każda grafika z Vulkanem: AMD Radeon, Intel, NVIDIA</td><td>komputery z AMD (np. Ryzen z Radeonem) i inne bez grafiki Intel</td>
+      <td>Osobny program whisper.cpp dostaje całe nagranie, sam wykrywa mowę i przenosi kontekst między fragmentami (tak wypadł najlepiej w testach).
+      Beam 2, model q8_0 (ok. 0,9 GB). Program jest budowany z oficjalnych źródeł w repozytorium aplikacji i sprawdzany sumą kontrolną przed uruchomieniem.
+      Przed transkrypcją krótki autotest: jeśli Vulkan nie widzi karty – procesor.</td></tr>
+  <tr><td><b>Procesor</b><br>faster-whisper</td><td>rdzenie procesora</td><td>zawsze działa; awaryjnie, gdy grafika zawiedzie</td>
+      <td>Te same porcje do 28 s co na grafice Intel. Ustawiasz wątki, rdzenie, beam, typ obliczeń. Ok. 3× wolniej niż grafika.</td></tr>
+  <tr><td><b>NVIDIA</b><br>faster-whisper (CUDA)</td><td>karta NVIDIA</td><td>komputery z GeForce/RTX</td>
+      <td>Jak procesor, ale na karcie NVIDIA – zwykle najszybciej. Wymaga bibliotek CUDA (aplikacja zaproponuje instalację); przy starcie test karty.</td></tr>
+</table>
+<p>Kolejność awaryjna: <b>Grafika Intel → procesor</b>, <b>Vulkan → procesor</b>, <b>NVIDIA → procesor</b>. Pod listą plików zobaczysz,
+jeśli transkrypcja przeszła na inne urządzenie.</p>
+<p>Transkrypcja działa w <b>osobnym procesie</b> o niskim priorytecie: okno i nagrywanie nie zwalniają, a pamięć po modelu (kilka GB) zwalnia się po skończeniu kolejki.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="procesor">8. Jak to działa: procesor, rdzenie, praca w tle</h2>
+<h3>Rdzenie P i E</h3>
+<p>Nowsze procesory Intel (12. generacji i nowsze, np. Core i5-1345U) mają dwa rodzaje rdzeni:</p>
+<ul>
+  <li><b>P</b> (wydajne) – szybkie, do pracy na pierwszym planie. Na i5-1345U: 2 rdzenie = 4 wątki.</li>
+  <li><b>E</b> (energooszczędne) – wolniejsze (ok. 2×), ale jest ich więcej. Na i5-1345U: 8 rdzeni = 8 wątków.</li>
+</ul>
+<p>Aplikacja odczytuje typy rdzeni z Windows i przypina swoje procesy do wybranych. Typowy podział:
+<b>praca w tle (transkrypcja, konwersja kilku plików) na E</b>, a <b>P zostają dla Ciebie</b> – przeglądarki, Teams, pracy.
+Procesory AMD Ryzen zwykle mają same pełne rdzenie – wtedy „E” oznacza po prostu wszystkie, a podział robi zapas dla systemu.</p>
+
+<h3>Zapas dla systemu</h3>
+<p>Przy kilku konwersjach naraz aplikacja zawsze zostawia część wątków wolnych: 1 (procesor do 4 wątków), 2 (do 8), 4 (więcej).
+Zostawiane są pierwsze wątki – na procesorach Intel z rdzeniami P/E to właśnie rdzenie P.</p>
+
+<h3>Niski priorytet i tryb wydajności Windows</h3>
+<ul>
+  <li>Obróbka, konwersja i transkrypcja działają w <b>osobnych procesach o obniżonym priorytecie</b>. Windows zawsze najpierw obsługuje Ciebie –
+      w pomiarach praca na pierwszym planie nie zwalniała nawet przy 3 konwersjach naraz.</li>
+  <li>Windows 11 sam włącza procesom w tle „tryb wydajności” (EcoQoS): niskie taktowanie i długie przestoje. Dla tej aplikacji to tylko hamulec
+      (obróbka szła ~2× wolniej), więc aplikacja go dla siebie wyłącza – także gdy jest zminimalizowana albo w zasobniku.</li>
+  <li>W trakcie nagrywania, obróbki, transkrypcji i konwersji komputer <b>nie przechodzi w uśpienie</b> (ekran może się wygasić).</li>
+</ul>
+
+<h3>Limit mocy laptopa</h3>
+<p>Procesory do laptopów mają limit mocy (np. 15–25 W). Im więcej rdzeni pracuje, tym niższe taktowanie każdego – dlatego na laptopie
+3 konwersje naraz dają ok. 15–30% zysku, a nie 3×, a powyżej 3–4 zysku już nie ma. Komputery stacjonarne i mocniejsze procesory zyskują więcej.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="wydajnosc">9. Wydajność – pomiary</h2>
+<p>Pomiary na laptopie z Intel Core i5-1345U i grafiką Iris Xe, na zasilaczu (listopad 2026).</p>
+<h3>Transkrypcja</h3>
+<p>Nagranie spotkania 5,8 min, porównane z ręczną transkrypcją, ze słownikiem nazw:</p>
+<table>
+  <tr><th>Urządzenie</th><th>Błędne słowa (WER)</th><th>Błędne litery (CER)</th><th>Czas</th></tr>
+  <tr><td>Grafika Intel (OpenVINO)</td><td>22,6%</td><td>12,6%</td><td>59 s</td></tr>
+  <tr><td>Grafika Vulkan (whisper.cpp, beam 2)</td><td>24,1%</td><td>12,2%</td><td>65 s</td></tr>
+  <tr><td>Procesor (beam 2, rdzenie P)</td><td>24,4%</td><td>13,4%</td><td>184 s</td></tr>
+</table>
+<p>WER ok. 20–25% przy spotkaniach to dobry wynik: część „błędów” to różnice zapisu (np. „yyy”, powtórzenia, mówienie jednocześnie).
+Różnice 1–2 punktów procentowych na krótkim nagraniu mogą być przypadkowe.</p>
+<h3>Konwersja (wyrównanie + odszumianie)</h3>
+<table>
+  <tr><th>Zadanie</th><th>Czas</th></tr>
+  <tr><td>1 plik, 42,6 min nagrania, rdzenie P</td><td>47 s</td></tr>
+  <tr><td>1 plik, 42,6 min nagrania, rdzenie E</td><td>105 s</td></tr>
+  <tr><td>3 pliki (126 min), po kolei na P</td><td>ok. 140 s</td></tr>
+  <tr><td>3 pliki (126 min), naraz na E</td><td>119 s</td></tr>
+  <tr><td>3 pliki (126 min), naraz na P</td><td>102 s</td></tr>
+</table>
+<h3>Obróbka nagrania</h3>
+<p>Godzina nagrania (dwa kanały, szum + głośność + bramka mowy): ok. 3–4 minuty.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="pliki">10. Pliki i foldery</h2>
+<table>
+  <tr><th>Co</th><th>Gdzie</th></tr>
+  <tr><td>Nagrania</td><td>Folder nagrań (domyślnie <code>Wideo</code>), nazwa z datą i godziną.</td></tr>
+  <tr><td>Surowe nagrania (opcja)</td><td>Podfolder <code>surowe</code> w folderze nagrań.</td></tr>
+  <tr><td>Wyniki transkrypcji</td><td>Podfolder <code>przetworzone</code> obok nagrania (razem z oryginałem).</td></tr>
+  <tr><td>Stan przerwanej transkrypcji</td><td>Plik <code>.transcribe_state</code> obok nagrania – znika po skończeniu.</td></tr>
+  <tr><td>Ustawienia</td><td><code>config.json</code> w folderze aplikacji.</td></tr>
+  <tr><td>Dziennik błędów</td><td><code>notatnik.log</code> w folderze aplikacji (powstaje dopiero przy pierwszym błędzie).</td></tr>
+  <tr><td>Modele Whisper (procesor, Intel, Vulkan)</td><td><code>%USERPROFILE%\.cache\huggingface</code> – ok. 1–3 GB, pobierane raz.</td></tr>
+  <tr><td>Skompilowany model dla grafiki Intel</td><td><code>%USERPROFILE%\.cache\fw-openvino</code></td></tr>
+  <tr><td>Program whisper.cpp (Vulkan)</td><td><code>%USERPROFILE%\.cache\whisper-cpp</code> (ok. 90 MB)</td></tr>
+</table>
+<p>Pliki tymczasowe (np. kopia do obróbki przed transkrypcją, <code>*.obrobka.tmp</code>, <code>*.part</code>) są usuwane automatycznie.
+Folderów pamięci podręcznej (<code>.cache</code>) można bezpiecznie usunąć – aplikacja pobierze modele ponownie przy następnym użyciu.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="prywatnosc">11. Prywatność</h2>
+<ul>
+  <li>Nagrywanie, obróbka, konwersja i transkrypcja działają <b>wyłącznie na Twoim komputerze</b>. Nagrania i teksty nigdzie nie są wysyłane.</li>
+  <li>Internet jest potrzebny tylko do jednorazowego pobrania pakietów, modeli (Hugging Face) i programu whisper.cpp (GitHub).</li>
+  <li>Mikrofon jest otwierany tylko podczas nagrywania i przez 10 s po kliknięciu „Sprawdź poziomy”.</li>
+  <li>Nagrania, transkrypcje, ustawienia (w tym słownik nazw) i logi nie trafiają do repozytorium kodu.</li>
+  <li>Pamiętaj o zgodzie rozmówców na nagrywanie – aplikacja nagrywa wszystko, co słychać w głośnikach.</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="problemy">12. Rozwiązywanie problemów</h2>
+
+<h4>W nagraniu słychać tylko mnie (albo tylko rozmówców)</h4>
+<ul>
+  <li>Sprawdź, czy w 🔊 wybrane jest urządzenie, na którym faktycznie gra Teams (Teams może grać na słuchawkach, a domyślne urządzenie Windows to głośniki).</li>
+  <li>Jeśli plik jest stereo i nieobrobiony (aplikację zamknięto przed końcem obróbki), Ty jesteś w lewym kanale, a rozmówcy w prawym –
+      odtwarzacz z jedną słuchawką albo w trybie mono może grać tylko jeden. Uruchom aplikację: sama dokończy obróbkę i połączy kanały.</li>
+</ul>
+
+<h4>Słychać moje oddechy / siorbanie</h4>
+<p>Włącz Nagrywanie → ⚙ → „wycisz mój mikrofon, gdy nie mówię”. Działa dla nowych nagrań.</p>
+
+<h4>Po aktualizacji nie widzę nowych opcji</h4>
+<p>Działa jeszcze stara kopia (np. schowana w zasobniku). Zamknij przez <b>Zakończ</b> w menu ikony i uruchom ponownie – <a href="#okno">rozdział 2</a>.</p>
+
+<h4>Transkrypcja idzie na procesorze, choć mam grafikę</h4>
+<ul>
+  <li>Pod listą plików jest komunikat, na co przeszła transkrypcja; szczegóły w logu transkrypcji.</li>
+  <li>Grafika Intel: brak pakietu <code>openvino-genai</code> albo stary sterownik graficzny – zaktualizuj sterownik.</li>
+  <li>Vulkan: autotest nie znalazł karty – zaktualizuj sterownik grafiki (AMD Adrenalin, Intel, NVIDIA).</li>
+</ul>
+
+<h4>Pierwsza transkrypcja bardzo długo „startuje”</h4>
+<p>Pobiera model (1–1,5 GB) i – na grafice Intel – kompiluje go pod kartę (kilka minut). To jednorazowe; kolejne starty trwają kilka sekund.</p>
+
+<h4>Brakujące pakiety / błąd instalacji</h4>
+<p>Aplikacja pokaże polecenie do ręcznego wpisania w terminalu. Szczegóły błędu są w <code>notatnik.log</code>.
+Jeśli wcześniej odmówiłeś instalacji pakietów do transkrypcji, aplikacja zapyta ponownie przy pierwszej transkrypcji.</p>
+
+<h4>Nie widzę ikony w zasobniku</h4>
+<p>Sprawdź rozwijane menu „^” przy zegarze i opcję „ikona zawsze widoczna na pasku” w ⚙. Bez pakietu <code>pystray</code> zasobnik jest niedostępny
+(aplikacja zaproponuje jego instalację przy starcie).</p>
+
+<h4>Konwersja / obróbka na baterii jest wolna</h4>
+<p>Na baterii aplikacja konwertuje tylko 1 plik naraz, a Windows obniża wydajność procesora. Podłącz zasilacz przy dużych porcjach plików.</p>
+
+<h4>Gdzie szukać szczegółów błędu?</h4>
+<p>W pliku <code>notatnik.log</code> w folderze aplikacji. Przy zgłaszaniu problemu dołącz jego koniec.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2 id="slowniczek">13. Słowniczek</h2>
+<table>
+  <tr><td><b>Beam (beam size)</b></td><td>Ile wariantów zdania model rozważa naraz. Więcej = dokładniej, wolniej.</td></tr>
+  <tr><td><b>CER</b></td><td>Odsetek błędnych liter względem wzorcowej transkrypcji.</td></tr>
+  <tr><td><b>EcoQoS</b></td><td>„Tryb wydajności” Windows 11 – spowalnia procesy w tle, żeby oszczędzać energię. Aplikacja go dla siebie wyłącza.</td></tr>
+  <tr><td><b>kbps</b></td><td>Kilobity na sekundę – „gęstość” zapisu dźwięku. Więcej = lepsza jakość i większy plik.</td></tr>
+  <tr><td><b>Loopback (WASAPI)</b></td><td>Nagrywanie tego, co gra w głośnikach/słuchawkach – w ten sposób aplikacja nagrywa rozmówców.</td></tr>
+  <tr><td><b>OpenVINO</b></td><td>Biblioteka Intela do szybkiego uruchamiania modeli na jego grafikach i procesorach.</td></tr>
+  <tr><td><b>Opus</b></td><td>Nowoczesny format dźwięku – bardzo mały przy dobrej jakości mowy (godzina ≈ 14 MB).</td></tr>
+  <tr><td><b>Rdzenie P / E</b></td><td>Wydajne i energooszczędne rdzenie nowszych procesorów Intel – <a href="#procesor">rozdział 8</a>.</td></tr>
+  <tr><td><b>Token</b></td><td>Kawałek słowa, na którym „myśli” model. Limit słownika nazw liczony jest w tokenach.</td></tr>
+  <tr><td><b>VAD</b></td><td>Wykrywanie mowy (Voice Activity Detection) – które fragmenty to mowa, a które cisza lub odgłosy.</td></tr>
+  <tr><td><b>Vulkan</b></td><td>Standard obliczeń na kartach graficznych obsługiwany przez sterowniki AMD, Intel i NVIDIA.</td></tr>
+  <tr><td><b>WER</b></td><td>Odsetek błędnych słów (złych, pominiętych, dopisanych) względem wzorcowej transkrypcji.</td></tr>
+  <tr><td><b>whisper.cpp</b></td><td>Niezależna implementacja Whispera w C++ – silnik „Grafika Vulkan”.</td></tr>
+  <tr><td><b>Whisper</b></td><td>Model rozpoznawania mowy firmy OpenAI, działający lokalnie.</td></tr>
+</table>
+<p style="color: var(--muted); margin-top: 40px; font-size: 14px;">Notatnik spotkań · Spisane.pl · podręcznik dla wersji z listopada 2026</p>
+</main>
+</div>
+</body>
+</html>

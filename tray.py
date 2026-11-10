@@ -182,7 +182,7 @@ def promote_icon(tooltip):
 # ── ikona w zasobniku ────────────────────────────────────────────────────────
 class Tray:
     """Ikona w zasobniku (pystray we własnym wątku). Akcje wracają do wątku okna przez ui(fn).
-    actions: {"show", "toggle_rec", "quit"}; is_recording() – do napisu w menu."""
+    actions: {"show", "toggle_rec", "help", "quit"}; is_recording() – do napisu w menu."""
 
     def __init__(self, title, icon_path, ui, actions, is_recording, always_visible=True):
         self.ok = False
@@ -211,6 +211,7 @@ class Tray:
             pystray.MenuItem("Pokaż okno", call("show"), default=True),   # też dwuklik / klik w ikonę
             pystray.MenuItem(lambda item: "■ Zatrzymaj nagrywanie" if self._is_rec() else "● Nagrywaj",
                              call("toggle_rec")),
+            pystray.MenuItem("Podręcznik", call("help")),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Zakończ", call("quit")),
         )

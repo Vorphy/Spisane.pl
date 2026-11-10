@@ -532,6 +532,42 @@ def leveled_tmp(path):
     return LEVEL_DIR / h / (Path(path).stem + ".opus")
 
 
+MANUAL_PATH = APP_DIR / "podrecznik.html"
+
+
+def open_manual(section=""):
+    """Podręcznik (podrecznik.html) w domyślnej przeglądarce, od rozdziału `section` (kotwica, np. "tr-opcje").
+    Przeglądarkę bierzemy z rejestru i podajemy jej adres wprost – os.startfile/webbrowser gubią „#rozdział”."""
+    url = MANUAL_PATH.as_uri() + (f"#{section}" if section else "")
+    try:
+        import shlex
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\Shell\Associations"
+                                                      r"\UrlAssociations\http\UserChoice") as k:
+            prog = winreg.QueryValueEx(k, "ProgId")[0]
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, prog + r"\shell\open\command") as k:
+            cmd = winreg.QueryValueEx(k, "")[0]
+        args = [a for a in shlex.split(cmd, posix=False)]
+        args = [a.strip('"') for a in args]
+        if "%1" in args:
+            args[args.index("%1")] = url
+        else:
+            args.append(url)
+        subprocess.Popen(args)
+    except Exception:
+        import webbrowser
+        webbrowser.open(url)
+
+
+def help_button(master, section, **pack):
+    """Mały „?” otwierający podręcznik od rozdziału danego okna."""
+    b = ctk.CTkButton(master, text="?", width=28, height=28, corner_radius=14, fg_color="transparent",
+                      border_width=1, border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
+                      command=lambda: open_manual(section))
+    b.pack(**pack)
+    return b
+
+
 def reveal(path):
     path = Path(path)
     try:
@@ -1332,6 +1368,7 @@ class TranscribeOptions(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="Domyślne", width=90, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
                       command=self._defaults).pack(side="left")
+        help_button(btns, "tr-opcje", side="left", padx=(8, 0))
         self.err = ctk.CTkLabel(btns, text="", text_color=RED)
         self.err.pack(side="left", padx=10)
         ctk.CTkButton(btns, text="Zapisz", width=90, command=self._save).pack(side="right")
@@ -1487,6 +1524,8 @@ def quality_value(label):
 class OptionsDialog(ctk.CTkToplevel):
     """Okno opcji zakładki: przewijana lista „etykieta – kontrolka – podpowiedź” i przyciski na dole."""
 
+    HELP = ""                # rozdział podręcznika dla „?” w tym oknie
+
     def __init__(self, app, title, size="620x520"):
         super().__init__(app)
         self.app = app
@@ -1506,6 +1545,7 @@ class OptionsDialog(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="Domyślne", width=90, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
                       command=self._defaults).pack(side="left")
+        help_button(btns, self.HELP, side="left", padx=(8, 0))
         self.err = ctk.CTkLabel(btns, text="", text_color=RED)
         self.err.pack(side="left", padx=10)
         ctk.CTkButton(btns, text="Zapisz", width=90, command=self._save).pack(side="right")
@@ -1556,6 +1596,7 @@ class OptionsDialog(ctk.CTkToplevel):
 
 
 class RecordOptions(OptionsDialog):
+    HELP = "nagr-opcje"
     KEYS = ("save_dir", "bitrate", "agc", "post_level", "post_denoise", "post_gate", "keep_raw")
 
     def __init__(self, app):
@@ -1636,6 +1677,7 @@ class RecordOptions(OptionsDialog):
 
 
 class ConvertOptions(OptionsDialog):
+    HELP = "konw-opcje"
     KEYS = ("convert_bitrate", "level_convert", "denoise_convert", "convert_cores", "convert_parallel",
             "original_action", "convert_out_dir")
     OUT = {"beside": "Obok oryginału", "folder": "Wybrany folder"}
@@ -2413,11 +2455,12 @@ class SettingsWindow(ctk.CTkToplevel):
         self.err.grid(row=9, column=0, columnspan=2, sticky="w", padx=18)
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.grid(row=10, column=0, columnspan=2, sticky="e", padx=18, pady=(6, 12))
+        btns.grid(row=10, column=0, columnspan=2, sticky="ew", padx=18, pady=(6, 12))
+        help_button(btns, "ustawienia", side="left")
         ctk.CTkButton(btns, text="Anuluj", width=90, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
-                      command=self.destroy).pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="Zapisz", width=90, command=self._save).pack(side="left")
+                      command=self.destroy).pack(side="right", padx=6)
+        ctk.CTkButton(btns, text="Zapisz", width=90, command=self._save).pack(side="right")
         if not ok:
             for w in (self.tray, self.close_tray, self.visible, self.auto_min):
                 w.configure(state="disabled")
@@ -2484,6 +2527,9 @@ class App(ctk.CTk):
         self.pin_btn = ctk.CTkButton(header, text="📌", width=24, height=22, corner_radius=11,
                                      font=ctk.CTkFont(size=11), text_color=MUTED, command=self.toggle_on_top)
         self.pin_btn.pack(side="right", padx=(0, 4))
+        ctk.CTkButton(header, text="?", width=24, height=22, corner_radius=11, font=ctk.CTkFont(size=13, weight="bold"),
+                      fg_color="transparent", hover_color=CARD, text_color=MUTED,
+                      command=open_manual).pack(side="right", padx=(0, 4))
         self._apply_on_top()
 
         self.tabs = ctk.CTkTabview(self, fg_color=BG, segmented_button_font=ctk.CTkFont(size=11, weight="bold"))
@@ -2502,13 +2548,15 @@ class App(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self._close_clicked)
         self.bind("<Control-r>", lambda e: self.rec_tab.toggle())
+        self.bind_all("<F1>", lambda e: open_manual())
 
         # Praca w tle: Windows nie przyhamowuje aplikacji schowanej / zminimalizowanej.
         tray.no_power_throttling()
         self._awake = False
         self._revealed = False
         self.tray = tray.Tray(APP_NAME, ICON_PATH, self.ui,
-                              {"show": self.show_window, "toggle_rec": self._tray_toggle_rec, "quit": self.quit_app},
+                              {"show": self.show_window, "toggle_rec": self._tray_toggle_rec, "help": open_manual,
+                               "quit": self.quit_app},
                               self.rec_tab.is_recording, always_visible=self.cfg["tray_always_visible"])
         self.bind("<Unmap>", self._on_unmap)
         if not (self.tray.ok and self.cfg["autostart_minimized"] and tray.TRAY_ARG in sys.argv):
