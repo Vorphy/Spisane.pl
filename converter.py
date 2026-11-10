@@ -68,7 +68,21 @@ def channel_count(path):
         return 0
 
 
-def _decode(path, cancel=None, progress=None, channel=None):
+def _decode(path, cancel=None, progress=None, channel=None, block=RATE):
+    """Jak _decode_frames, ale w blokach ~1 s – obróbka wsadowa (FFT, wykrywanie mowy) jest wtedy
+    kilka razy szybsza niż na kawałkach po 20 ms prosto z dekodera."""
+    buf, n = [], 0
+    for x in _decode_frames(path, cancel, progress, channel):
+        buf.append(x)
+        n += x.shape[-1]
+        if n >= block:
+            yield np.concatenate(buf, axis=-1)
+            buf, n = [], 0
+    if buf:
+        yield np.concatenate(buf, axis=-1)
+
+
+def _decode_frames(path, cancel=None, progress=None, channel=None):
     """Generator bloków float32 48 kHz.
     channel=None – mono (kanały zmiksowane), 0/1 – jeden kanał pliku stereo, "both" – tablica (2, n)."""
     stereo = channel is not None
@@ -187,33 +201,37 @@ class _Denoiser:
         self.skip = N_FFT - HOP                          # pierwsze próbki wyjścia to rozbieg
         self.k3 = np.ones(5, np.float32) / 5
 
-    def _gain(self, X, center):
-        blk = min(len(self.profile) - 1, max(0, int(center // FRAME) // self.step))
-        noise = self.profile[blk][_BIN_BAND]
-        p = (np.abs(X) ** 2) / _WPOW
-        g = np.maximum(1 - NR_OVER * noise / np.maximum(p, 1e-14), NR_FLOOR)
-        g = np.convolve(g, self.k3, mode="same")                 # wygładzenie w częstotliwości
-        g = np.maximum(g, self.prev_g * 0.6)                      # wygładzenie w czasie
-        self.prev_g = g
-        return g * HP
-
     def process(self, x, final=False):
+        """Wszystkie pełne ramki bloku naraz (FFT wsadowo), wynik identyczny z liczeniem ramka po ramce."""
         buf = np.concatenate([self.inbuf, x])
         if final:
             buf = np.concatenate([buf, np.zeros(N_FFT, np.float32)])
-        out = []
-        i = 0
-        while i + N_FFT <= len(buf):
-            fr = buf[i:i + N_FFT] * _WIN
-            X = np.fft.rfft(fr)
-            X *= self._gain(X, self.frame_pos + N_FFT / 2)
-            self.ola += np.fft.irfft(X, N_FFT).astype(np.float32) * _WIN
-            out.append(self.ola[:HOP].copy())
-            self.ola = np.concatenate([self.ola[HOP:], np.zeros(HOP, np.float32)])
-            i += HOP
-            self.frame_pos += HOP
-        self.inbuf = buf[i:]
-        y = np.concatenate(out) if out else np.zeros(0, np.float32)
+        F = (len(buf) - N_FFT) // HOP + 1 if len(buf) >= N_FFT else 0
+        if F:
+            fr = np.lib.stride_tricks.sliding_window_view(buf, N_FFT)[::HOP][:F] * _WIN
+            X = np.fft.rfft(fr, axis=1)
+            # profil szumu dla środka każdej ramki
+            centers = self.frame_pos + np.arange(F) * HOP + N_FFT / 2
+            blk = np.clip((centers // FRAME).astype(int) // self.step, 0, len(self.profile) - 1)
+            noise = self.profile[blk][:, _BIN_BAND]
+            p = (np.abs(X) ** 2) / _WPOW
+            g = np.maximum(1 - NR_OVER * noise / np.maximum(p, 1e-14), NR_FLOOR)
+            gp = np.pad(g, ((0, 0), (2, 2)))                       # wygładzenie w częstotliwości (jak convolve "same")
+            g = (gp[:, :-4] + gp[:, 1:-3] + gp[:, 2:-2] + gp[:, 3:-1] + gp[:, 4:]) * self.k3[0]
+            prev = self.prev_g
+            for t in range(F):                                     # wygładzenie w czasie (rekurencyjne)
+                prev = np.maximum(g[t], prev * 0.6)
+                g[t] = prev
+            self.prev_g = prev
+            Y = np.fft.irfft(X * (g * HP), N_FFT, axis=1).astype(np.float32) * _WIN
+            # nakładanie z przesunięciem N_FFT/2: wyjście k = ogon ramki k-1 + początek ramki k
+            tails = np.concatenate([self.ola[None, :HOP], Y[:-1, HOP:]])
+            y = (tails + Y[:, :HOP]).reshape(-1)
+            self.ola = np.concatenate([Y[-1, HOP:], np.zeros(HOP, np.float32)])
+            self.frame_pos += F * HOP
+        else:
+            y = np.zeros(0, np.float32)
+        self.inbuf = buf[F * HOP:]
         if self.skip:
             cut = min(self.skip, len(y))
             y = y[cut:]
@@ -239,23 +257,25 @@ class _SpeechDetector:
         self.model = get_vad_model()
         self.rest = np.zeros(0, np.float32)
         self.buf, self.probs = [], []
+        self.n = 0                                  # próbek 16 kHz w self.buf
 
     def feed(self, x, final=False):
         self.rest = np.concatenate([self.rest, x])
         m = len(self.rest) // 3 * 3
         if m:
             self.buf.append(self.rest[:m].reshape(-1, 3).mean(axis=1))   # 48 → 16 kHz
+            self.n += m // 3
             self.rest = self.rest[m:]
-        if final or sum(len(b) for b in self.buf) >= 16000 * 60:          # model po minucie
+        if final or self.n >= 16000 * 60:                                 # model po minucie
             a = np.concatenate(self.buf) if self.buf else np.zeros(0, np.float32)
-            self.buf = []
+            self.buf, self.n = [], 0
             if final and len(a) % VAD_N:
                 a = np.pad(a, (0, VAD_N - len(a) % VAD_N))
             m = len(a) // VAD_N * VAD_N
             if m:
                 self.probs.append(np.asarray(self.model(a[:m])).reshape(-1))
             if len(a) > m:
-                self.buf = [a[m:]]
+                self.buf, self.n = [a[m:]], len(a) - m
 
     def gate(self, n_frames):
         """-> tłumienie dB na ramkę 20 ms (0 = mowa, GATE_DB = reszta)."""
@@ -289,62 +309,89 @@ def _soft_clip(y):
     return y
 
 
-def _analyze(src, level, denoise, cancel, prog, channel=None, gate=False):
-    """Przebiegi analizy jednego sygnału (mono albo jednego kanału) -> (gain, centers, profile).
-    gate=True – bramka mowy (Silero VAD) dopisana do krzywej wzmocnienia: poza mową GATE_DB.
-    prog(ułamek 0..1) – postęp samej analizy."""
-    gain = centers = None
-    dbs, bands, rest = [], [], np.zeros(0, np.float32)
-    det = None
-    if gate:
-        try:
-            det = _SpeechDetector()
-        except Exception:       # brak faster-whisper/onnxruntime – obróbka bez bramki
-            det = None
-    p1 = 0.5 if (level and denoise) else 1.0
-    for blk in _decode(src, cancel, lambda f: prog(f * p1), channel):
-        if det:
-            det.feed(blk)
-        rest = np.concatenate([rest, blk])
-        m = len(rest) // FRAME * FRAME
-        if m:
-            fr = rest[:m].reshape(-1, FRAME)
-            dbs.append(10 * np.log10(np.mean(fr * fr, axis=1) + 1e-14))
-            if denoise:
-                bands.append(_band_psd(fr))
-            rest = rest[m:]
-    db = np.concatenate(dbs) if dbs else np.zeros(0)
-    active, floor = _activity(db) if len(db) else (np.zeros(0, bool), None)
-    profile = _noise_profile(np.concatenate(bands), active) if (denoise and bands) else None
-    gate_db = det.gate(len(db)) if det and len(db) else None
-    lvl_active = active & (gate_db > GATE_DB / 2) if gate_db is not None else active   # poziom tylko z mowy
-    if level and len(db):
-        if profile is not None:
-            # ── poziom mowy PO odszumieniu ──
-            d2, rest, dbs2 = _Denoiser(*profile), np.zeros(0, np.float32), []
+class _Levels:
+    """Poziom (dB) ramek 20 ms ze strumienia bloków dowolnej długości."""
 
-            def measure(y):
-                nonlocal rest
-                rest = np.concatenate([rest, y])
-                m = len(rest) // FRAME * FRAME
-                if m:
-                    fr = rest[:m].reshape(-1, FRAME)
-                    dbs2.append(10 * np.log10(np.mean(fr * fr, axis=1) + 1e-14))
-                    rest = rest[m:]
-            for blk in _decode(src, cancel, lambda f: prog(0.5 + f * 0.5), channel):
-                measure(d2.process(blk))
-            measure(d2.process(np.zeros(0, np.float32), final=True))
-            db2 = np.concatenate(dbs2) if dbs2 else db
-            n = min(len(db2), len(active))
-            # GDZIE jest mowa – z oryginału (pewne), JAK głośna – po odszumieniu
-            gain = _gain_curve(db2[:n], lvl_active[:n], None, top=MAX_GAIN_NR)
-        else:
-            gain = _gain_curve(db, lvl_active)
-    if gate_db is not None:
-        gain = gate_db if gain is None else gain + gate_db[:len(gain)]
-    if gain is not None:
-        centers = np.arange(len(gain)) * FRAME + FRAME / 2
-    return gain, centers, profile
+    def __init__(self, bands=False):
+        self.rest, self.dbs, self.bands, self.want_bands = np.zeros(0, np.float32), [], [], bands
+
+    def feed(self, y):
+        self.rest = np.concatenate([self.rest, y])
+        m = len(self.rest) // FRAME * FRAME
+        if m:
+            fr = self.rest[:m].reshape(-1, FRAME)
+            self.dbs.append(10 * np.log10(np.mean(fr * fr, axis=1) + 1e-14))
+            if self.want_bands:
+                self.bands.append(_band_psd(fr))
+            self.rest = self.rest[m:]
+
+    @property
+    def db(self):
+        return np.concatenate(self.dbs) if self.dbs else np.zeros(0)
+
+
+def _analyze(src, level, denoise, cancel, prog, chans=(None,), gates=None):
+    """Przebiegi analizy -> [(gain, centers, profile)] dla każdego sygnału z chans
+    ([None] = mono, [0, 1] = oba kanały pliku stereo – dekodowane RAZ na przebieg, nie osobno).
+    gates[k]=True – bramka mowy (Silero VAD) dopisana do krzywej wzmocnienia k: poza mową GATE_DB.
+    prog(ułamek 0..1) – postęp samej analizy."""
+    split = list(chans) != [None]
+    mode = "both" if split else None
+    n = len(chans)
+    gates = gates or [False] * n
+    lv = [_Levels(bands=denoise) for _ in range(n)]
+    dets = []
+    for g in gates:
+        try:
+            dets.append(_SpeechDetector() if g else None)
+        except Exception:       # brak faster-whisper/onnxruntime – obróbka bez bramki
+            dets.append(None)
+    two = level and denoise
+    p1 = 0.5 if two else 1.0
+    for blk in _decode(src, cancel, lambda f: prog(f * p1), mode):
+        for k, x in enumerate(blk if split else [blk]):
+            if dets[k]:
+                dets[k].feed(x)
+            lv[k].feed(x)
+
+    st = []
+    for k in range(n):
+        db = lv[k].db
+        active = _activity(db)[0] if len(db) else np.zeros(0, bool)
+        profile = _noise_profile(np.concatenate(lv[k].bands), active) if (denoise and lv[k].bands) else None
+        gate_db = dets[k].gate(len(db)) if dets[k] and len(db) else None
+        lvl_active = active & (gate_db > GATE_DB / 2) if gate_db is not None else active   # poziom tylko z mowy
+        st.append({"db": db, "active": lvl_active, "profile": profile, "gate": gate_db, "gain": None})
+
+    if level:
+        need = [k for k in range(n) if len(st[k]["db"]) and st[k]["profile"] is not None]
+        if need:
+            # ── poziom mowy PO odszumieniu (wszystkie kanały w jednym przebiegu) ──
+            dens = {k: _Denoiser(*st[k]["profile"]) for k in need}
+            lv2 = {k: _Levels() for k in need}
+            for blk in _decode(src, cancel, lambda f: prog(0.5 + f * 0.5), mode):
+                sigs = blk if split else [blk]
+                for k in need:
+                    lv2[k].feed(dens[k].process(sigs[k]))
+            for k in need:
+                lv2[k].feed(dens[k].process(np.zeros(0, np.float32), final=True))
+                db2 = lv2[k].db if lv2[k].dbs else st[k]["db"]
+                m = min(len(db2), len(st[k]["active"]))
+                # GDZIE jest mowa – z oryginału (pewne), JAK głośna – po odszumieniu
+                st[k]["gain"] = _gain_curve(db2[:m], st[k]["active"][:m], None, top=MAX_GAIN_NR)
+        for k in range(n):
+            if st[k]["gain"] is None and len(st[k]["db"]):
+                st[k]["gain"] = _gain_curve(st[k]["db"], st[k]["active"])
+
+    out = []
+    for s_ in st:
+        gain, centers = s_["gain"], None
+        if s_["gate"] is not None:
+            gain = s_["gate"] if gain is None else gain + s_["gate"][:len(gain)]
+        if gain is not None:
+            centers = np.arange(len(gain)) * FRAME + FRAME / 2
+        out.append((gain, centers, s_["profile"]))
+    return out
 
 
 def convert_to_opus(src, dst=None, bitrate=32000, progress=None, cancel=None, level=False, denoise=False,
@@ -374,14 +421,13 @@ def convert_to_opus(src, dst=None, bitrate=32000, progress=None, cancel=None, le
 
     # ── analiza (0–60% postępu przy obróbce) ──
     plans = []
-    for k, ch in enumerate(chans):
-        if two_pass:
-            lo, hi = 0.6 * k / len(chans), 0.6 * (k + 1) / len(chans)
-            g, c, prof = _analyze(src, level, denoise, cancel, lambda f, lo=lo, hi=hi: prog(lo + f * (hi - lo)), ch,
-                                  gate=gate and ch == 0)
+    if two_pass:
+        res = _analyze(src, level, denoise, cancel, lambda f: prog(0.6 * f), chans,
+                       gates=[gate and ch == 0 for ch in chans])
+        for g, c, prof in res:
             plans.append({"gain": g, "centers": c, "den": _Denoiser(*prof) if prof is not None else None, "pos": 0})
-        else:
-            plans.append({"gain": None, "centers": None, "den": None, "pos": 0})
+    else:
+        plans = [{"gain": None, "centers": None, "den": None, "pos": 0} for _ in chans]
 
     # ── zapis ──
     out = None

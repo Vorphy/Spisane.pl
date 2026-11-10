@@ -17,6 +17,7 @@ import tempfile
 import threading
 from pathlib import Path
 
+import engine
 from engine import AUDIO_EXTENSIONS, MODEL_KEYS, scan_folder, watch_candidates  # noqa: F401
 
 WORKER = Path(__file__).resolve().parent / "worker.py"
@@ -57,6 +58,7 @@ class Worker:
         self.proc = subprocess.Popen(
             [python_console_exe(), "-u", str(WORKER), str(self.flag)], env=env, creationflags=flags,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        engine.no_power_throttling(getattr(self.proc, "_handle", None))
         self.key = model_key(opts)
         threading.Thread(target=self._read_proto, args=(self.proc,), daemon=True).start()
         threading.Thread(target=self._read_err, args=(self.proc,), daemon=True).start()

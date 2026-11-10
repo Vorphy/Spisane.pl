@@ -163,6 +163,28 @@ def cores_mask(cores):
     return sum(1 << c for c in selected), f"{label}: CPU {','.join(map(str, selected))}"
 
 
+def no_power_throttling(handle):
+    """Wyłącza dla procesu tryb wydajności Windows 11 (EcoQoS). Windows sam go włącza procesom w tle
+    bez okna i z niskim priorytetem: niskie taktowanie i długie przestoje, obróbka szła ~2× wolniej.
+    Niski priorytet zostaje, więc okno i nagrywanie nadal mają pierwszeństwo."""
+    if os.name != "nt" or handle is None:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PPT(ctypes.Structure):
+            _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG),
+                        ("StateMask", wintypes.ULONG)]
+        st = _PPT(1, 1, 0)       # PROCESS_POWER_THROTTLING_EXECUTION_SPEED: kontrolowane, wyłączone
+        k32 = ctypes.windll.kernel32
+        k32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.SetProcessInformation.restype = wintypes.BOOL
+        return bool(k32.SetProcessInformation(int(handle), 4, ctypes.byref(st), ctypes.sizeof(st)))  # 4 = ProcessPowerThrottling
+    except Exception:
+        return False
+
+
 def set_affinity(cores, handle=None):
     """Przypina proces (domyślnie BIEŻĄCY; albo uchwyt innego procesu) do rdzeni:
     'p', 'e', 'all' albo liczba N (pierwsze N procesorów logicznych – najpierw P, potem E).

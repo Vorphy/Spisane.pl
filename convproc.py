@@ -55,6 +55,7 @@ def convert(src, dst=None, bitrate=32000, level=False, denoise=False, cores="aut
     proc = subprocess.Popen([python_console_exe(), "-u", str(WORKER), json.dumps(args)],
                             env=env, creationflags=flags,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    engine.no_power_throttling(getattr(proc, "_handle", None))
     err_tail = []
 
     def read_err():
