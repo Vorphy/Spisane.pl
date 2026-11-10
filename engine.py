@@ -265,36 +265,30 @@ class Segment:
         self.text = text
 
 
-# ── Whisper na grafice Intel (OpenVINO) ──────────────────────────────────
-class IGPUWhisper:
-    """Whisper na zintegrowanej grafice Intel (Iris Xe) przez OpenVINO.
-    Udaje interfejs WhisperModel.transcribe(). Model (OpenVINO/whisper-<model>-int8-ov)
-    pobiera się przy pierwszym użyciu."""
+# ── Transkrypcja porcjami (wspólne dla grafiki Intel i faster-whisper) ───────────────
+class PortionWhisper:
+    """Udaje interfejs WhisperModel.transcribe(). Mowę (po VAD) dzieli na porcje najwyżej jednego okna Whispera,
+    cięte zawsze w ciszy, i transkrybuje każdą osobno; potem sprawdza miejsca podejrzane o pominięcie (VAD).
+    Podklasy dostarczają _config() i _generate()."""
 
     SR = 16000
-    # Ile sekund mowy wysyłać do GPU naraz. Najwyżej jedno okno Whispera (30 s), cięte zawsze w ciszy (VAD).
-    # Przy 120 s OpenVINO samo dzieliło porcję na okna 30 s w przypadkowych miejscach i gubiło całe wypowiedzi:
-    # test 2026-11-09 z ręczną transkrypcją (3 min) – 120 s: WER 30,9%, 58 pominiętych słów;
-    # 28 s: WER 24,4%, 22 pominięte (procesor beam 2: 29,1%, 51); czas +14%.
+    # Ile sekund mowy transkrybować naraz: najwyżej jedno okno Whispera (30 s), cięte zawsze w ciszy (VAD).
+    # Dłuższe porcje model dzieli sam na okna 30 s w przypadkowych miejscach i gubi całe wypowiedzi.
+    # Test 2026-11-10 z ręczną transkrypcją (3 min), WER / pominięte słowa:
+    #   grafika: porcje 120 s 30,9% / 58 -> 28 s 24,4% / 22 (czas +14%);
+    #   procesor beam 2: cała mowa naraz (faster-whisper) 29,1% / 51 -> 28 s 26,1% / 28 (czas bez zmian).
     PORTION_S = 28
     RETRY_S = 5            # mowa (po VAD) tak długa bez tekstu albo z za małą liczbą słów = transkrybuj ponownie
     MIN_WORDS_PER_S = 0.5  # normalna mowa to ok. 2 słowa/s
 
-    def __init__(self, model_name, log=print):
-        import openvino_genai as ov_genai
-        from huggingface_hub import snapshot_download
-        self.log = log
-        path = snapshot_download(f"OpenVINO/whisper-{model_name}-int8-ov")
-        # Pamięć podręczna skompilowanego modelu – kolejne starty trwają sekundy, nie ~40 s
-        cache_dir = Path.home() / ".cache" / "fw-openvino"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        self.pipe = ov_genai.WhisperPipeline(path, "GPU", CACHE_DIR=str(cache_dir))
+    beam_size = 1
 
-    def transcribe(self, audio, language="pl", vad_filter=True, initial_prompt=None, **_ignored):
+    def transcribe(self, audio, language="pl", vad_filter=True, initial_prompt=None, beam_size=1, **_ignored):
         from types import SimpleNamespace
         from faster_whisper import decode_audio
         from faster_whisper.vad import VadOptions, get_speech_timestamps
 
+        self.beam_size = beam_size
         if isinstance(audio, str):
             audio = decode_audio(audio, sampling_rate=self.SR)
         if vad_filter:
@@ -303,6 +297,13 @@ class IGPUWhisper:
             chunks = [{"start": 0, "end": len(audio)}]
         info = SimpleNamespace(duration=len(audio) / self.SR)
         return self._segments(audio, chunks, language, initial_prompt), info
+
+    def _config(self, language, initial_prompt):
+        raise NotImplementedError
+
+    def _generate(self, piece, cfg, offset):
+        """-> lista (start, koniec, tekst) w sekundach, przesunięta o offset"""
+        raise NotImplementedError
 
     def _segments(self, audio, chunks, language, initial_prompt):
         import numpy as np
@@ -319,13 +320,7 @@ class IGPUWhisper:
             portions.append(current)
 
         for i, portion in enumerate(portions):
-            cfg = self.pipe.get_generation_config()
-            cfg.language = f"<|{language}|>"
-            cfg.task = "transcribe"
-            cfg.return_timestamps = True
-            cfg.num_beams = 1  # beam search na GPU nie jest obsługiwany przez OpenVINO
-            if i == 0 and initial_prompt:
-                cfg.initial_prompt = initial_prompt
+            cfg = self._config(language, initial_prompt if i == 0 else None)
             piece = np.concatenate([audio[c["start"]:c["end"]] for c in portion])
             segs = self._generate(piece, cfg, 0.0)
             segs = self._verify_with_vad(piece, segs, cfg, portion)
@@ -335,7 +330,7 @@ class IGPUWhisper:
 
     def _verify_with_vad(self, piece, segs, cfg, portion):
         """Porcja zawiera już tylko mowę, więc fragment bez tekstu albo segment z podejrzanie małą
-        liczbą słów oznacza, że model przeskoczył okno (beam 1 czasem tak robi).
+        liczbą słów oznacza, że model przeskoczył fragment.
         Takie miejsca transkrybujemy ponownie i bierzemy wynik, jeśli ma więcej słów."""
         words = lambda ss: sum(len(re.findall(r"\w+", s[2])) for s in ss)
         piece_end = len(piece) / self.SR
@@ -360,6 +355,42 @@ class IGPUWhisper:
                 segs = [s for s in segs if s not in old] + found
         return sorted(segs)
 
+    def _to_original_time(self, t, portion):
+        """Czas w sklejonej porcji (bez ciszy) -> czas w oryginalnym nagraniu."""
+        pos = max(0.0, t) * self.SR
+        for c in portion:
+            n = c["end"] - c["start"]
+            if pos <= n:
+                return (c["start"] + pos) / self.SR
+            pos -= n
+        return portion[-1]["end"] / self.SR
+
+
+# ── Whisper na grafice Intel (OpenVINO) ──────────────────────────────────
+class IGPUWhisper(PortionWhisper):
+    """Whisper na zintegrowanej grafice Intel (Iris Xe) przez OpenVINO.
+    Model (OpenVINO/whisper-<model>-int8-ov) pobiera się przy pierwszym użyciu."""
+
+    def __init__(self, model_name, log=print):
+        import openvino_genai as ov_genai
+        from huggingface_hub import snapshot_download
+        self.log = log
+        path = snapshot_download(f"OpenVINO/whisper-{model_name}-int8-ov")
+        # Pamięć podręczna skompilowanego modelu – kolejne starty trwają sekundy, nie ~40 s
+        cache_dir = Path.home() / ".cache" / "fw-openvino"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self.pipe = ov_genai.WhisperPipeline(path, "GPU", CACHE_DIR=str(cache_dir))
+
+    def _config(self, language, initial_prompt):
+        cfg = self.pipe.get_generation_config()
+        cfg.language = f"<|{language}|>"
+        cfg.task = "transcribe"
+        cfg.return_timestamps = True
+        cfg.num_beams = 1  # beam search na GPU nie jest jeszcze obsługiwany przez OpenVINO (CVS-195124)
+        if initial_prompt:
+            cfg.initial_prompt = initial_prompt
+        return cfg
+
     def _generate(self, piece, cfg, offset):
         result = self.pipe.generate(piece.tolist(), cfg)
         piece_end = len(piece) / self.SR
@@ -372,15 +403,25 @@ class IGPUWhisper:
             segs.append((offset + max(0.0, ch.start_ts), offset + end_ts, text))
         return segs
 
-    def _to_original_time(self, t, portion):
-        """Czas w sklejonej porcji (bez ciszy) -> czas w oryginalnym nagraniu."""
-        pos = max(0.0, t) * self.SR
-        for c in portion:
-            n = c["end"] - c["start"]
-            if pos <= n:
-                return (c["start"] + pos) / self.SR
-            pos -= n
-        return portion[-1]["end"] / self.SR
+
+# ── faster-whisper (procesor / NVIDIA) porcjami ──────────────────────────
+class FasterWhisperPortions(PortionWhisper):
+    """faster-whisper z tym samym podziałem na porcje co grafika. Bez tego faster-whisper skleja całą mowę
+    i przesuwa okno 30 s według znaczników czasu – w długich wypowiedziach gubił całe fragmenty
+    (test z ręczną transkrypcją: WER 29,1% -> 26,1%, pominięte słowa 51 -> 28, ten sam czas)."""
+
+    def __init__(self, model, log=print):
+        self.model = model
+        self.log = log
+
+    def _config(self, language, initial_prompt):
+        return {"language": language, "initial_prompt": initial_prompt}
+
+    def _generate(self, piece, cfg, offset):
+        segs, _ = self.model.transcribe(piece, language=cfg["language"], beam_size=self.beam_size,
+                                        vad_filter=False, condition_on_previous_text=False,
+                                        initial_prompt=cfg["initial_prompt"])
+        return [(offset + sg.start, offset + sg.end, sg.text.strip()) for sg in segs if sg.text.strip()]
 
 
 # ── NVIDIA (CUDA) ────────────────────────────────────────────────────────
@@ -462,6 +503,8 @@ def load_model(opts, log=print):
         model = WhisperModel(opts["model"], device="cpu", compute_type=compute,
                              cpu_threads=int(opts["threads"]))
         log(f"Urządzenie: cpu ({compute}, {opts['threads']} wątków)")
+    if not isinstance(model, PortionWhisper):
+        model = FasterWhisperPortions(model, log=log)     # te same porcje ≤ 28 s co na grafice
     return LoadedModel(model, device, opts)
 
 

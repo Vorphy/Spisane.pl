@@ -1204,9 +1204,9 @@ class TranscribeOptions(ctk.CTkToplevel):
         self.device = ctk.CTkSegmentedButton(body, values=list(self.DEVICES.values()), command=lambda _: self._sync())
         self.device.set(self.DEVICES[o["device"]])
         self._place("Urządzenie", self.device,
-                    "Grafika Intel Iris Xe: ok. 5–7× szybciej, niż trwa nagranie (beam 1); fragmenty pominięte "
-                    "przez model wykrywa VAD i transkrybuje ponownie. Bez grafiki Intel samo przejdzie na procesor.\n"
-                    "Procesor: ok. 3× wolniej, obsługuje beam 2+ – dla ważnych nagrań: Procesor + beam 2.\n"
+                    "Grafika Intel Iris Xe: ok. 6–8× szybciej, niż trwa nagranie (beam 1). W teście z ręczną "
+                    "transkrypcją jakość równa procesorowi z beam 2. Bez grafiki Intel samo przejdzie na procesor.\n"
+                    "Procesor: ok. 2,5× wolniej niż grafika; beam 2+ daje tu niewiele.\n"
                     "NVIDIA (CUDA): dla komputerów z kartą GeForce/RTX – zwykle najszybsza opcja; brakujące "
                     "biblioteki CUDA aplikacja zaproponuje doinstalować. Bez karty NVIDIA samo przejdzie na procesor.")
 
