@@ -51,8 +51,8 @@ th { background: var(--card); font-weight: 600; }
 .opt .def { color: var(--muted); font-size: 14px; }
 .note, .warn, .tip { padding: 10px 14px; border-radius: 8px; margin: 12px 0; }
 .note { background: var(--accent-bg); }
-.tip { background: var(--card); border-left: 4px solid var(--ok); }
-.warn { background: var(--warn-bg); border-left: 4px solid var(--warn); }
+.tip { background: var(--card); border: 1px solid var(--line); }
+.warn { background: var(--warn-bg); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
 .steps { counter-reset: s; list-style: none; padding: 0; }
 .steps li { counter-increment: s; position: relative; padding-left: 38px; margin: 10px 0; }
 .steps li::before { content: counter(s); position: absolute; left: 0; top: 1px; width: 26px; height: 26px;
@@ -447,41 +447,41 @@ Folderów pamięci podręcznej (<code>.cache</code>) można bezpiecznie usunąć
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <h2 id="problemy">12. Rozwiązywanie problemów</h2>
 
-<h4>W nagraniu słychać tylko mnie (albo tylko rozmówców)</h4>
+<h3>W nagraniu słychać tylko mnie (albo tylko rozmówców)</h3>
 <ul>
   <li>Sprawdź, czy w 🔊 wybrane jest urządzenie, na którym faktycznie gra Teams (Teams może grać na słuchawkach, a domyślne urządzenie Windows to głośniki).</li>
   <li>Jeśli plik jest stereo i nieobrobiony (aplikację zamknięto przed końcem obróbki), Ty jesteś w lewym kanale, a rozmówcy w prawym –
       odtwarzacz z jedną słuchawką albo w trybie mono może grać tylko jeden. Uruchom aplikację: sama dokończy obróbkę i połączy kanały.</li>
 </ul>
 
-<h4>Słychać moje oddechy / siorbanie</h4>
+<h3>Słychać moje oddechy / siorbanie</h3>
 <p>Włącz Nagrywanie → ⚙ → „wycisz mój mikrofon, gdy nie mówię”. Działa dla nowych nagrań.</p>
 
-<h4>Po aktualizacji nie widzę nowych opcji</h4>
+<h3>Po aktualizacji nie widzę nowych opcji</h3>
 <p>Działa jeszcze stara kopia (np. schowana w zasobniku). Zamknij przez <b>Zakończ</b> w menu ikony i uruchom ponownie – <a href="#okno">rozdział 2</a>.</p>
 
-<h4>Transkrypcja idzie na procesorze, choć mam grafikę</h4>
+<h3>Transkrypcja idzie na procesorze, choć mam grafikę</h3>
 <ul>
   <li>Pod listą plików jest komunikat, na co przeszła transkrypcja; szczegóły w logu transkrypcji.</li>
   <li>Grafika Intel: brak pakietu <code>openvino-genai</code> albo stary sterownik graficzny – zaktualizuj sterownik.</li>
   <li>Vulkan: autotest nie znalazł karty – zaktualizuj sterownik grafiki (AMD Adrenalin, Intel, NVIDIA).</li>
 </ul>
 
-<h4>Pierwsza transkrypcja bardzo długo „startuje”</h4>
+<h3>Pierwsza transkrypcja bardzo długo „startuje”</h3>
 <p>Pobiera model (1–1,5 GB) i – na grafice Intel – kompiluje go pod kartę (kilka minut). To jednorazowe; kolejne starty trwają kilka sekund.</p>
 
-<h4>Brakujące pakiety / błąd instalacji</h4>
+<h3>Brakujące pakiety / błąd instalacji</h3>
 <p>Aplikacja pokaże polecenie do ręcznego wpisania w terminalu. Szczegóły błędu są w <code>notatnik.log</code>.
 Jeśli wcześniej odmówiłeś instalacji pakietów do transkrypcji, aplikacja zapyta ponownie przy pierwszej transkrypcji.</p>
 
-<h4>Nie widzę ikony w zasobniku</h4>
+<h3>Nie widzę ikony w zasobniku</h3>
 <p>Sprawdź rozwijane menu „^” przy zegarze i opcję „ikona zawsze widoczna na pasku” w ⚙. Bez pakietu <code>pystray</code> zasobnik jest niedostępny
 (aplikacja zaproponuje jego instalację przy starcie).</p>
 
-<h4>Konwersja / obróbka na baterii jest wolna</h4>
+<h3>Konwersja / obróbka na baterii jest wolna</h3>
 <p>Na baterii aplikacja konwertuje tylko 1 plik naraz, a Windows obniża wydajność procesora. Podłącz zasilacz przy dużych porcjach plików.</p>
 
-<h4>Gdzie szukać szczegółów błędu?</h4>
+<h3>Gdzie szukać szczegółów błędu?</h3>
 <p>W pliku <code>notatnik.log</code> w folderze aplikacji. Przy zgłaszaniu problemu dołącz jego koniec.</p>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
