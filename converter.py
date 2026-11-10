@@ -221,6 +221,65 @@ class _Denoiser:
         return y
 
 
+# ── Bramka mowy (ścieżka mikrofonu) ────────────────────────────────────────
+# Silero VAD (z faster-whisper) ocenia co 32 ms, czy to mowa. Poza mową mikrofon jest ściszany
+# o GATE_DB – znikają oddechy, siorbanie, stukanie, a rozmówcy na drugiej ścieżce zostają czyści.
+GATE_DB = -40.0               # tłumienie poza mową
+GATE_ON, GATE_OFF = 0.5, 0.35 # progi prawdopodobieństwa mowy (histereza)
+GATE_MIN = 10                 # ramek = 0,2 s – krótsze „wypowiedzi” to odgłosy, nie mowa
+GATE_PRE, GATE_POST = 8, 15   # ramek = 0,16 s przed / 0,3 s po mowie zostaje (początki i końcówki słów)
+VAD_N = 512                   # próbek 16 kHz = 32 ms – krok modelu
+
+
+class _SpeechDetector:
+    """Zbiera sygnał 48 kHz, liczy prawdopodobieństwo mowy (Silero) co 32 ms."""
+
+    def __init__(self):
+        from faster_whisper.vad import get_vad_model   # import tu – tylko gdy bramka włączona
+        self.model = get_vad_model()
+        self.rest = np.zeros(0, np.float32)
+        self.buf, self.probs = [], []
+
+    def feed(self, x, final=False):
+        self.rest = np.concatenate([self.rest, x])
+        m = len(self.rest) // 3 * 3
+        if m:
+            self.buf.append(self.rest[:m].reshape(-1, 3).mean(axis=1))   # 48 → 16 kHz
+            self.rest = self.rest[m:]
+        if final or sum(len(b) for b in self.buf) >= 16000 * 60:          # model po minucie
+            a = np.concatenate(self.buf) if self.buf else np.zeros(0, np.float32)
+            self.buf = []
+            if final and len(a) % VAD_N:
+                a = np.pad(a, (0, VAD_N - len(a) % VAD_N))
+            m = len(a) // VAD_N * VAD_N
+            if m:
+                self.probs.append(np.asarray(self.model(a[:m])).reshape(-1))
+            if len(a) > m:
+                self.buf = [a[m:]]
+
+    def gate(self, n_frames):
+        """-> tłumienie dB na ramkę 20 ms (0 = mowa, GATE_DB = reszta)."""
+        self.feed(np.zeros(0, np.float32), final=True)
+        p = np.concatenate(self.probs) if self.probs else np.zeros(0)
+        idx = np.minimum(((np.arange(n_frames) + 0.5) * FRAME / 3 / VAD_N).astype(int), max(len(p) - 1, 0))
+        pf = p[idx] if len(p) else np.zeros(n_frames)
+        speech = np.zeros(n_frames, bool)
+        on = False
+        for i, v in enumerate(pf):                 # histereza
+            on = v >= GATE_ON or (on and v >= GATE_OFF)
+            speech[i] = on
+        # krótkie wyskoki (cmoknięcie, łyk) – precz
+        d = np.diff(np.concatenate([[0], speech.astype(np.int8), [0]]))
+        for s, e in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1)):
+            if e - s < GATE_MIN:
+                speech[s:e] = False
+        # margines przed i po mowie
+        k = np.convolve(speech.astype(float), np.ones(GATE_PRE + GATE_POST + 1), mode="full")
+        keep = k[GATE_PRE:GATE_PRE + n_frames] > 0   # mowa w [i-POST, i+PRE]
+        g = np.where(keep, 0.0, GATE_DB)
+        return np.convolve(np.pad(g, 2, mode="edge"), np.ones(5) / 5, mode="valid")   # łagodne wejście/wyjście
+
+
 def _soft_clip(y):
     a = np.abs(y)
     over = a > 0.9
@@ -230,13 +289,22 @@ def _soft_clip(y):
     return y
 
 
-def _analyze(src, level, denoise, cancel, prog, channel=None):
+def _analyze(src, level, denoise, cancel, prog, channel=None, gate=False):
     """Przebiegi analizy jednego sygnału (mono albo jednego kanału) -> (gain, centers, profile).
+    gate=True – bramka mowy (Silero VAD) dopisana do krzywej wzmocnienia: poza mową GATE_DB.
     prog(ułamek 0..1) – postęp samej analizy."""
     gain = centers = None
     dbs, bands, rest = [], [], np.zeros(0, np.float32)
+    det = None
+    if gate:
+        try:
+            det = _SpeechDetector()
+        except Exception:       # brak faster-whisper/onnxruntime – obróbka bez bramki
+            det = None
     p1 = 0.5 if (level and denoise) else 1.0
     for blk in _decode(src, cancel, lambda f: prog(f * p1), channel):
+        if det:
+            det.feed(blk)
         rest = np.concatenate([rest, blk])
         m = len(rest) // FRAME * FRAME
         if m:
@@ -248,6 +316,8 @@ def _analyze(src, level, denoise, cancel, prog, channel=None):
     db = np.concatenate(dbs) if dbs else np.zeros(0)
     active, floor = _activity(db) if len(db) else (np.zeros(0, bool), None)
     profile = _noise_profile(np.concatenate(bands), active) if (denoise and bands) else None
+    gate_db = det.gate(len(db)) if det and len(db) else None
+    lvl_active = active & (gate_db > GATE_DB / 2) if gate_db is not None else active   # poziom tylko z mowy
     if level and len(db):
         if profile is not None:
             # ── poziom mowy PO odszumieniu ──
@@ -267,21 +337,25 @@ def _analyze(src, level, denoise, cancel, prog, channel=None):
             db2 = np.concatenate(dbs2) if dbs2 else db
             n = min(len(db2), len(active))
             # GDZIE jest mowa – z oryginału (pewne), JAK głośna – po odszumieniu
-            gain = _gain_curve(db2[:n], active[:n], None, top=MAX_GAIN_NR)
+            gain = _gain_curve(db2[:n], lvl_active[:n], None, top=MAX_GAIN_NR)
         else:
-            gain = _gain_curve(db, active)
+            gain = _gain_curve(db, lvl_active)
+    if gate_db is not None:
+        gain = gate_db if gain is None else gain + gate_db[:len(gain)]
+    if gain is not None:
         centers = np.arange(len(gain)) * FRAME + FRAME / 2
     return gain, centers, profile
 
 
 def convert_to_opus(src, dst=None, bitrate=32000, progress=None, cancel=None, level=False, denoise=False,
-                    source="konwersja", split_channels=False):
+                    source="konwersja", split_channels=False, gate=False):
     """
     Konwertuje src -> dst (.opus, mono).
     level=True   – wyrównanie głośności (okno 0,8 s, z podglądem do przodu),
     denoise=True – redukcja szumu tła (filtr <80 Hz + bramka widmowa, maks. -15 dB).
     split_channels=True i plik stereo (nagranie: lewy = mikrofon, prawy = rozmówcy) – każdy kanał
     analizowany i obrabiany osobno (własny profil szumu, własne wyrównanie), potem miks do mono.
+    gate=True (tylko z split_channels) – bramka mowy na kanale mikrofonu: oddechy, siorbanie itp. ściszone.
     Przebiegi: analiza poziomu i szumu [+ pomiar mowy po odszumieniu] dla każdego sygnału, na końcu zapis.
     Odszumianie jest deterministyczne, więc pomiar i zapis dają ten sam sygnał.
     progress(ułamek 0..1), cancel() -> True przerywa. Przy błędzie usuwa niepełny plik.
@@ -293,8 +367,9 @@ def convert_to_opus(src, dst=None, bitrate=32000, progress=None, cancel=None, le
         raise ValueError("Plik wejściowy i wyjściowy to ten sam plik")
     tmp = dst.with_name(dst.name + ".part")
     prog = progress or (lambda f: None)
-    two_pass = level or denoise
     split = split_channels and channel_count(src) == 2
+    gate = gate and split
+    two_pass = level or denoise or gate
     chans = [0, 1] if split else [None]
 
     # ── analiza (0–60% postępu przy obróbce) ──
@@ -302,7 +377,8 @@ def convert_to_opus(src, dst=None, bitrate=32000, progress=None, cancel=None, le
     for k, ch in enumerate(chans):
         if two_pass:
             lo, hi = 0.6 * k / len(chans), 0.6 * (k + 1) / len(chans)
-            g, c, prof = _analyze(src, level, denoise, cancel, lambda f, lo=lo, hi=hi: prog(lo + f * (hi - lo)), ch)
+            g, c, prof = _analyze(src, level, denoise, cancel, lambda f, lo=lo, hi=hi: prog(lo + f * (hi - lo)), ch,
+                                  gate=gate and ch == 0)
             plans.append({"gain": g, "centers": c, "den": _Denoiser(*prof) if prof is not None else None, "pos": 0})
         else:
             plans.append({"gain": None, "centers": None, "den": None, "pos": 0})

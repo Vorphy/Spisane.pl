@@ -371,6 +371,7 @@ DEFAULTS = {
     "agc": True,                 # wyrównywanie na żywo – osobno mikrofon i rozmówcy
     "post_level": True,          # po nagraniu: wyrównanie głośności gotowego pliku
     "post_denoise": True,        # po nagraniu: usunięcie szumu
+    "post_gate": True,           # po nagraniu: mikrofon ściszony poza mową (oddechy, siorbanie)
     "keep_raw": False,           # po obróbce zachowaj surowe nagranie w podfolderze "surowe"
     "pause_while_recording": True,
     "convert_bitrate": None,     # None = jak nagrywanie (migracja ze wspólnego "bitrate")
@@ -1519,7 +1520,7 @@ class OptionsDialog(ctk.CTkToplevel):
 
 
 class RecordOptions(OptionsDialog):
-    KEYS = ("save_dir", "bitrate", "agc", "post_level", "post_denoise", "keep_raw")
+    KEYS = ("save_dir", "bitrate", "agc", "post_level", "post_denoise", "post_gate", "keep_raw")
 
     def __init__(self, app):
         super().__init__(app, "Opcje nagrywania", "640x640")
@@ -1541,7 +1542,13 @@ class RecordOptions(OptionsDialog):
         self.post_denoise = ctk.CTkSwitch(self.body, text="usuń szum tła")
         if cfg["post_denoise"]:
             self.post_denoise.select()
-        self._place("", self.post_denoise,
+        self._place("", self.post_denoise)
+        self.post_gate = ctk.CTkSwitch(self.body, text="wycisz mój mikrofon, gdy nie mówię")
+        if cfg["post_gate"]:
+            self.post_gate.select()
+        self._place("", self.post_gate,
+                    "Wykrywanie mowy usuwa z Twojej ścieżki oddechy, siorbanie, stukanie i szelesty między "
+                    "wypowiedziami. Rozmówców nie dotyka.\n"
                     "Mikrofon i rozmówcy są nagrywani osobno, a po nagraniu każdy jest obrabiany oddzielnie "
                     "(własny profil szumu i poziom) i dopiero wtedy łączony. Trwa ok. 3–5 min na godzinę "
                     "nagrania (rdzenie jak w Opcjach konwersji). Transkrypcja i konwersja nie powtórzą tych kroków.")
@@ -1585,6 +1592,7 @@ class RecordOptions(OptionsDialog):
         cfg["agc"] = bool(self.agc.get())
         cfg["post_level"] = bool(self.post_level.get())
         cfg["post_denoise"] = bool(self.post_denoise.get())
+        cfg["post_gate"] = bool(self.post_gate.get())
         cfg["keep_raw"] = bool(self.keep_raw.get())
         save_config(cfg)
         self._changed()
@@ -1990,7 +1998,8 @@ class RecordTab(ctk.CTkFrame):
     def update_summary(self):
         c = self.app.cfg
         d = Path(c["save_dir"])
-        post = [x for x, on in (("wyrównanie", c["post_level"]), ("bez szumu", c["post_denoise"])) if on]
+        post = [x for x, on in (("wyrównanie", c["post_level"]), ("bez szumu", c["post_denoise"]),
+                                ("bez oddechów", c["post_gate"])) if on]
         parts = [f"„{d.name or d}”", quality_label(c["bitrate"]),
                  "po nagraniu: " + (" + ".join(post) if post else "bez obróbki")]
         if not c["post_level"]:
@@ -2112,8 +2121,9 @@ class RecordTab(ctk.CTkFrame):
     def _post_process(self, path):
         c = dict(self.app.cfg)
         level, denoise, keep = c["post_level"], c["post_denoise"], c["keep_raw"]
-        what = " i ".join(x for x, on in (("wyrównuję głośność", level), ("usuwam szum", denoise)) if on) \
-            or "łączę ścieżki"
+        gate = c["post_gate"]
+        what = ", ".join(x for x, on in (("wyrównuję głośność", level), ("usuwam szum", denoise),
+                                         ("wyciszam oddechy", gate)) if on) or "łączę ścieżki"
         tmp = path.with_name(path.stem + ".obrobka.tmp")      # bez rozszerzenia audio – monitor go nie weźmie
         self.processing.add(path)
         self._post_status(f"Zapisano ✓  Teraz {what}…")
@@ -2124,7 +2134,7 @@ class RecordTab(ctk.CTkFrame):
             try:
                 convproc.convert(path, tmp, bitrate=c["bitrate"], level=level, denoise=denoise,
                                  cores=c["convert_cores"], recording=self.is_recording, source="nagrywanie",
-                                 split_channels=True,
+                                 split_channels=True, gate=gate,
                                  progress=lambda f: ui(lambda: self._post_status(
                                      f"Zapisano ✓  Teraz {what}… {f:.0%}")),
                                  cancel=self.post_cancel.is_set)
@@ -2158,7 +2168,8 @@ class RecordTab(ctk.CTkFrame):
         if err:
             self._post_status(f"Obróbka się nie udała – zostało surowe nagranie ({err})", RED)
             return
-        self._post_status("Zapisano i obrobiono ✓" if (self.app.cfg["post_level"] or self.app.cfg["post_denoise"])
+        self._post_status("Zapisano i obrobiono ✓" if (self.app.cfg["post_level"] or self.app.cfg["post_denoise"]
+                                                       or self.app.cfg["post_gate"])
                           else "Zapisano ✓", GREEN)
         if not self.rec and self.last_file == path and path.exists():
             parts = self.file_lbl.cget("text").split("   ·   ")

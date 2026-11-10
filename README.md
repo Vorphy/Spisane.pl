@@ -35,6 +35,8 @@ Mikrofon i dźwięk z głośników (rozmówcy) są nagrywane do **dwóch osobnyc
 każdy kanał jest obrabiany oddzielnie: ma własny profil szumu i własne wyrównanie głośności. Potem oba
 łączą się w jeden plik Opus mono, który zastępuje surowy. Dzięki temu cichy rozmówca nie ginie pod głośnym,
 także gdy mówicie jednocześnie. Szum z Twojego mikrofonu jest usuwany niezależnie od dźwięku rozmówców.
+Wykrywanie mowy (Silero VAD z faster-whisper) wycisza Twój mikrofon, gdy nie mówisz. Dzięki temu
+oddechy, siorbanie czy stukanie nie nakładają się na rozmówców (przełącznik „wycisz mój mikrofon, gdy nie mówię”).
 Obróbkę (wyrównanie, szum) i zachowanie surowego nagrania ustawiasz w Nagrywanie → **⚙ Opcje**.
 
 Obrobione pliki mają w metadanych znacznik (co zrobiono i kiedy). Transkrypcja i konwersja wyłączają wtedy

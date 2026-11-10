@@ -5,7 +5,7 @@ Dlaczego osobny proces: przypięcie do rdzeni i niski priorytet dotyczą wtedy t
 konwersji, a nie okna i nagrywania (te są w procesie aplikacji).
 
 Wywołanie: python convert_worker.py '<json z parametrami>'
-  {"src", "dst", "bitrate", "level", "denoise", "source", "split_channels"}
+  {"src", "dst", "bitrate", "level", "denoise", "source", "split_channels", "gate"}
 Rdzenie ustawia z zewnątrz convproc.py (także w locie, np. gdy zacznie się nagrywanie).
 stdout → jedna wiadomość JSON na linię:
   {"ev": "progress", "f"} | {"ev": "done", "dst"} | {"ev": "error", "msg", "trace"}
@@ -45,7 +45,8 @@ def main():
         dst = converter.convert_to_opus(a["src"], a.get("dst"), bitrate=a.get("bitrate", 32000),
                                         level=a.get("level", False), denoise=a.get("denoise", False),
                                         source=a.get("source", "konwersja"),
-                                        split_channels=a.get("split_channels", False), progress=progress)
+                                        split_channels=a.get("split_channels", False),
+                                        gate=a.get("gate", False), progress=progress)
         emit("done", dst=str(dst))
     except Exception as e:
         emit("error", msg=f"{type(e).__name__}: {e}", trace=traceback.format_exc())
