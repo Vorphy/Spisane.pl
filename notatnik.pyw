@@ -746,6 +746,8 @@ class TranscribeTab(FileQueue):
             parts.append(f"beam {o['beam_size']}")
         if not o["vad"]:
             parts.append("bez VAD")
+        if o.get("vocab_on") and (o.get("vocab") or "").strip():
+            parts.append("słownik")
         c = self.app.cfg
         fx = [x for x, on in (("wyrównanie", c["level_transcribe"]), ("bez szumu", c["denoise_transcribe"])) if on]
         if fx:
@@ -1254,6 +1256,17 @@ class TranscribeOptions(ctk.CTkToplevel):
             self.vad.select()
         self._place("VAD", self.vad)
 
+        # ── słownik nazw ──
+        self.vocab_sw = ctk.CTkSwitch(body, text="podpowiadaj modelowi nazwy z listy", command=self._vocab_count)
+        if o["vocab_on"]:
+            self.vocab_sw.select()
+        self._place("Słownik nazw", self.vocab_sw)
+        self.vocab = ctk.CTkTextbox(body, width=440, height=96, wrap="word")
+        self.vocab.insert("1.0", o["vocab"])
+        self.vocab.bind("<KeyRelease>", lambda _: self._vocab_count())
+        self.vocab_hint = self._place("", self.vocab, " ")
+        self._vocab_count()
+
         # ── przygotowanie dźwięku i nagrywanie ──
         self.level_sw = ctk.CTkSwitch(body, text="wyrównaj głośność")
         if app.cfg["level_transcribe"]:
@@ -1347,13 +1360,30 @@ class TranscribeOptions(ctk.CTkToplevel):
         self.threads.configure(state="normal" if dev == "cpu" else "disabled")
         self.cores_n.configure(state="normal" if self.cores.get() == self.CORES["n"] else "disabled")
 
+    def _vocab_text(self):
+        return " ".join(self.vocab.get("1.0", "end").split())
+
+    def _vocab_count(self):
+        n, limit = engine.vocab_tokens(self._vocab_text()), engine.VOCAB_MAX_TOKENS
+        over = n > limit
+        state = "wyłączony – " if not self.vocab_sw.get() else ""
+        self.vocab_hint.configure(
+            text=f"{state}{n} / {limit} tokenów{' – za dużo, skróć listę' if over else ''}\n"
+                 "Nazwy, nazwiska i żargon po przecinku, np. „Kubernetes, Proxmox, Kowalski”. Trafiają do każdego "
+                 "fragmentu nagrania. W teście: o ok. 3 pkt % mniej błędów, nazwy z listy 8 z 9 zamiast 2. "
+                 "Odmian (Kowalskiego) nie trzeba dopisywać. Lista zostaje tylko na tym komputerze.",
+            text_color=RED if over else MUTED)
+        return n
+
     def _pick_watch(self):
         d = filedialog.askdirectory(parent=self, initialdir=self.watch_dir.get())
         if d:
             self.watch_dir.set(str(Path(d)))
 
     def _defaults(self):
-        self.app.cfg["tr_opts"] = dict(engine.DEFAULT_OPTIONS)
+        old = self.app.cfg["tr_opts"]   # słownik nazw zostaje – to dane użytkownika, nie ustawienie
+        self.app.cfg["tr_opts"] = dict(engine.DEFAULT_OPTIONS, vocab=old.get("vocab", ""),
+                                       vocab_on=old.get("vocab_on", True))
         for k in ("level_transcribe", "denoise_transcribe", "pause_while_recording"):
             self.app.cfg[k] = DEFAULTS[k]
         save_config(self.app.cfg)
@@ -1372,6 +1402,9 @@ class TranscribeOptions(ctk.CTkToplevel):
         except ValueError:
             self.err.configure(text="Beam size i wątki: liczba całkowita ≥ 1")
             return
+        if self._vocab_count() > engine.VOCAB_MAX_TOKENS:
+            self.err.configure(text=f"Słownik nazw: najwyżej {engine.VOCAB_MAX_TOKENS} tokenów")
+            return
         cores = {v: k for k, v in self.CORES.items()}[self.cores.get()]
         if cores == "n":
             try:
@@ -1385,6 +1418,7 @@ class TranscribeOptions(ctk.CTkToplevel):
             "device": self._dev(), "compute_type": compute, "threads": threads, "cores": cores,
             "format": self.fmt.get(), "beam_size": beam, "timestamps": bool(self.ts.get()),
             "vad": bool(self.vad.get()), "limit_time": "",
+            "vocab": self._vocab_text(), "vocab_on": bool(self.vocab_sw.get()),
         }
         self.app.cfg["level_transcribe"] = bool(self.level_sw.get())
         self.app.cfg["denoise_transcribe"] = bool(self.nr_sw.get())

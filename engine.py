@@ -49,7 +49,36 @@ DEFAULT_OPTIONS = {
     "timestamps": True,
     "vad": True,
     "limit_time": "",          # np. "45" (minut) albo "01:15:00"; pusto = bez przycinania
+    "vocab": "",               # słownik nazw (hotwords) – trzymany tylko w config.json, nie w repozytorium
+    "vocab_on": True,
 }
+
+# Słownik nazw: Whisper przyjmuje najwyżej 223 tokeny podpowiedzi (max_length // 2 - 1).
+# Test 2026-11-10 (ręczna transkrypcja, lista 196 tokenów z Confluence): WER grafika 24,4% -> 21,1%,
+# procesor beam 2 26,1% -> 22,9%; nazwy z listy we wzorcu 2 -> 8 z 9, bez wstawiania nazw, których nie mówiono.
+# hotwords i initial_prompt dały to samo; hotwords trafia odrobinę więcej nazw. Dopisywanie odmian nic nie daje.
+VOCAB_MAX_TOKENS = 223
+_tokenizer = None
+
+
+def vocab_tokens(text):
+    """Liczba tokenów Whispera dla słownika (jak liczy faster-whisper: ' ' + tekst).
+    Bez pobranego tokenizera – przybliżenie."""
+    global _tokenizer
+    text = (text or "").strip()
+    if not text:
+        return 0
+    if _tokenizer is None:
+        try:
+            import tokenizers
+            from huggingface_hub import try_to_load_from_cache
+            path = try_to_load_from_cache("mobiuslabsgmbh/faster-whisper-large-v3-turbo", "tokenizer.json")
+            _tokenizer = tokenizers.Tokenizer.from_file(path) if isinstance(path, str) else False
+        except Exception:
+            _tokenizer = False
+    if _tokenizer:
+        return len(_tokenizer.encode(" " + text, add_special_tokens=False).ids)
+    return round(len(text) / 2.6)   # polski tekst z nazwami: ok. 2,6 znaku na token
 
 # Opcje wymagające ponownego załadowania modelu (reszta działa per plik)
 MODEL_KEYS = ("model", "device", "compute_type", "threads", "cores")
@@ -282,13 +311,16 @@ class PortionWhisper:
     MIN_WORDS_PER_S = 0.5  # normalna mowa to ok. 2 słowa/s
 
     beam_size = 1
+    hotwords = None
 
-    def transcribe(self, audio, language="pl", vad_filter=True, initial_prompt=None, beam_size=1, **_ignored):
+    def transcribe(self, audio, language="pl", vad_filter=True, initial_prompt=None, beam_size=1, hotwords=None,
+                   **_ignored):
         from types import SimpleNamespace
         from faster_whisper import decode_audio
         from faster_whisper.vad import VadOptions, get_speech_timestamps
 
         self.beam_size = beam_size
+        self.hotwords = (hotwords or "").strip() or None   # słownik nazw – do każdej porcji
         if isinstance(audio, str):
             audio = decode_audio(audio, sampling_rate=self.SR)
         if vad_filter:
@@ -389,6 +421,8 @@ class IGPUWhisper(PortionWhisper):
         cfg.num_beams = 1  # beam search na GPU nie jest jeszcze obsługiwany przez OpenVINO (CVS-195124)
         if initial_prompt:
             cfg.initial_prompt = initial_prompt
+        if self.hotwords:
+            cfg.hotwords = self.hotwords
         return cfg
 
     def _generate(self, piece, cfg, offset):
@@ -420,7 +454,7 @@ class FasterWhisperPortions(PortionWhisper):
     def _generate(self, piece, cfg, offset):
         segs, _ = self.model.transcribe(piece, language=cfg["language"], beam_size=self.beam_size,
                                         vad_filter=False, condition_on_previous_text=False,
-                                        initial_prompt=cfg["initial_prompt"])
+                                        initial_prompt=cfg["initial_prompt"], hotwords=self.hotwords)
         return [(offset + sg.start, offset + sg.end, sg.text.strip()) for sg in segs if sg.text.strip()]
 
 
@@ -599,6 +633,10 @@ def transcribe_file(lm, audio_path, opts, on_segment=None, on_progress=None, sho
         # Bez przenoszenia kontekstu między oknami 30 s – zapobiega zapętlaniu zdań
         "condition_on_previous_text": False,
     }
+    vocab = (opts.get("vocab") or "").strip() if opts.get("vocab_on", True) else ""
+    if vocab:
+        kwargs["hotwords"] = vocab
+        log(f"Słownik nazw: {vocab_tokens(vocab)} tokenów")
     if start_at > 0:
         if limit and start_at >= limit:
             log("Wznowienie jest już za limitem czasu – transkrypcja kompletna.")
