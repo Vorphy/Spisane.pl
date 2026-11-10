@@ -26,6 +26,11 @@ from tkinter import filedialog, messagebox
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 
+import tray          # noqa: E402  – zasobnik, autostart, jedna kopia (tylko biblioteka standardowa)
+_INSTANCE = tray.SingleInstance()
+if not _INSTANCE.first:          # już działa (np. z autostartu) – pokazała swoje okno, ta kopia kończy
+    sys.exit(0)
+
 import deps          # noqa: E402  – brakujące pakiety (nowy komputer): zapytaj i doinstaluj
 deps.ensure()
 
@@ -385,6 +390,9 @@ DEFAULTS = {
     "convert_cores": "auto",     # auto / p / e / all – też przygotowanie dźwięku do transkrypcji
     "appearance": "system",
     "always_on_top": False,      # 📌 w nagłówku
+    "tray": True,                # minimalizacja chowa okno do zasobnika
+    "close_to_tray": False,      # krzyżyk chowa do zasobnika zamiast zamykać
+    "autostart_minimized": True, # autostart: od razu schowany w zasobniku (sam autostart = wpis w rejestrze)
     "window_pos": None,          # [x, y] – gdzie było okno przy zamknięciu (ten sam monitor po starcie)
 }
 
@@ -2241,33 +2249,80 @@ class SettingsWindow(ctk.CTkToplevel):
         super().__init__(app)
         self.app = app
         self.title("Ustawienia aplikacji")
-        self.geometry("520x220")
+        self.geometry("540x440")
         self.resizable(False, False)
         place_dialog(self, app)
         self.grid_columnconfigure(1, weight=1)
         cfg = app.cfg
+        ok = app.tray.ok
 
-        ctk.CTkLabel(self, text="Wygląd", anchor="w").grid(row=0, column=0, sticky="w", padx=(18, 12), pady=(18, 8))
+        def label(text, row, top=8):
+            ctk.CTkLabel(self, text=text, anchor="w").grid(row=row, column=0, sticky="nw",
+                                                           padx=(18, 12), pady=(top, 2))
+
+        def hint(text, row):
+            ctk.CTkLabel(self, text=text, text_color=MUTED, font=ctk.CTkFont(size=11), wraplength=360,
+                         justify="left").grid(row=row, column=1, sticky="w", pady=(2, 6))
+
+        def switch(text, on, row, top=8, command=None):
+            w = ctk.CTkSwitch(self, text=text, command=command)
+            if on:
+                w.select()
+            w.grid(row=row, column=1, sticky="w", pady=(top, 2))
+            return w
+
+        label("Wygląd", 0, 18)
         self.look = ctk.CTkSegmentedButton(self, values=["Systemowy", "Jasny", "Ciemny"])
         self.look.set({"system": "Systemowy", "light": "Jasny", "dark": "Ciemny"}.get(cfg["appearance"], "Systemowy"))
         self.look.grid(row=0, column=1, sticky="w", pady=(18, 8))
 
+        label("Zasobnik", 1, 14)
+        self.tray = switch("minimalizuj do zasobnika (obok zegara)", cfg["tray"] and ok, 1, 14)
+        self.close_tray = switch("krzyżyk też chowa do zasobnika", cfg["close_to_tray"] and ok, 2, 4)
+        hint("Kliknięcie ikony przywraca okno, a w jej menu jest Nagrywaj i Zakończ." if ok else
+             "Ikona w zasobniku jest niedostępna (brak pakietu pystray).", 3)
+
+        label("Autostart", 4, 14)
+        self.autostart = switch("uruchamiaj razem z Windows", tray.autostart_enabled(), 4, 14, self._sync)
+        self.auto_min = switch("od razu schowana w zasobniku", cfg["autostart_minimized"] and ok, 5, 4)
+        hint("Tylko dla Twojego konta, bez uprawnień administratora.", 6)
+
         ctk.CTkLabel(self, text="Opcje nagrywania, transkrypcji i konwersji są w każdej zakładce "
                                 "pod przyciskiem ⚙ Opcje.",
-                     text_color=MUTED, font=ctk.CTkFont(size=11), wraplength=470, justify="left"
-                     ).grid(row=1, column=0, columnspan=2, sticky="w", padx=18, pady=(8, 0))
+                     text_color=MUTED, font=ctk.CTkFont(size=11), wraplength=490, justify="left"
+                     ).grid(row=7, column=0, columnspan=2, sticky="w", padx=18, pady=(10, 0))
+        self.err = ctk.CTkLabel(self, text="", text_color=RED, font=ctk.CTkFont(size=11))
+        self.err.grid(row=8, column=0, columnspan=2, sticky="w", padx=18)
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.grid(row=2, column=0, columnspan=2, sticky="e", padx=18, pady=(24, 12))
+        btns.grid(row=9, column=0, columnspan=2, sticky="e", padx=18, pady=(6, 12))
         ctk.CTkButton(btns, text="Anuluj", width=90, fg_color="transparent", border_width=1,
                       border_color=CARD_BORDER, text_color=("gray20", "gray85"), hover_color=CARD,
                       command=self.destroy).pack(side="left", padx=6)
         ctk.CTkButton(btns, text="Zapisz", width=90, command=self._save).pack(side="left")
+        if not ok:
+            for w in (self.tray, self.close_tray, self.auto_min):
+                w.configure(state="disabled")
+        self._sync()
+
+    def _sync(self):
+        if self.app.tray.ok:
+            self.auto_min.configure(state="normal" if self.autostart.get() else "disabled")
 
     def _save(self):
         cfg = self.app.cfg
+        ok = self.app.tray.ok
         cfg["appearance"] = {"Systemowy": "system", "Jasny": "light", "Ciemny": "dark"}[self.look.get()]
         ctk.set_appearance_mode(cfg["appearance"])
+        if ok:
+            cfg["tray"] = bool(self.tray.get())
+            cfg["close_to_tray"] = bool(self.close_tray.get())
+            cfg["autostart_minimized"] = bool(self.auto_min.get())
+        try:
+            tray.set_autostart(bool(self.autostart.get()), minimized=ok and cfg["autostart_minimized"])
+        except OSError as e:
+            self.err.configure(text=f"Nie udało się zmienić autostartu: {e}")
+            return
         save_config(cfg)
         self.destroy()
 
@@ -2324,19 +2379,88 @@ class App(ctk.CTk):
         self.conv_tab = ConvertTab(self.tabs.tab("Konwersja"), self)
         self.conv_tab.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
 
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.protocol("WM_DELETE_WINDOW", self._close_clicked)
         self.bind("<Control-r>", lambda e: self.rec_tab.toggle())
+
+        # Praca w tle: Windows nie przyhamowuje aplikacji schowanej / zminimalizowanej.
+        tray.no_power_throttling()
+        self._awake = False
+        self._revealed = False
+        self.tray = tray.Tray(APP_NAME, ICON_PATH, self.ui,
+                              {"show": self.show_window, "toggle_rec": self._tray_toggle_rec, "quit": self.quit_app},
+                              self.rec_tab.is_recording)
+        self.bind("<Unmap>", self._on_unmap)
+        if not (self.tray.ok and self.cfg["autostart_minimized"] and tray.TRAY_ARG in sys.argv):
+            self.after(200, self._reveal)   # przy starcie z Windows zostaje w zasobniku do kliknięcia
         self.after(100, self._pump)
-        self.after(200, self._reveal)
         self.after(100, self._fast_tick)
         self.after(500, self._slow_tick)
 
     def _reveal(self):
         global _ROOT_POS
+        self._revealed = True
         self.deiconify()
         _ROOT_POS = None
         self.after(30, lambda: _fix_client_size(self, 320, 420) if self._current_width <= 330 else _fix_client_size(self))
         self.after(80, lambda: _fit_on_monitor(self))
+
+    # ── zasobnik ──
+    def show_window(self):
+        if not self._revealed:
+            self._reveal()
+        else:
+            self.deiconify()
+        self.lift()
+        self.attributes("-topmost", True)            # na pewno na wierzch, potem wg 📌
+        self.after(150, self._apply_on_top)
+        try:
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _on_unmap(self, event):
+        if event.widget is self and self.cfg["tray"] and self.tray.ok:
+            self.after(10, lambda: self.state() == "iconic" and self.withdraw())
+
+    def _close_clicked(self):
+        if self.cfg["close_to_tray"] and self.tray.ok:
+            self.withdraw()
+            if not self.cfg.get("tray_hint_shown"):
+                self.tray.notify("Działam dalej w zasobniku. Zamykasz przez „Zakończ” w menu ikony.", APP_NAME)
+                self.cfg["tray_hint_shown"] = True
+                save_config(self.cfg)
+        else:
+            self.on_close()
+
+    def _tray_toggle_rec(self):
+        was = self.rec_tab.is_recording()
+        self.rec_tab.toggle()
+        if not was and not self.rec_tab.is_recording():     # start się nie udał – pokaż komunikat
+            self.show_window()
+
+    def quit_app(self):
+        self.show_window()                  # ewentualne pytanie „Na pewno zamknąć?” musi być widoczne
+        self.after(200, self.on_close)
+
+    def _tray_tick(self):
+        rec = self.rec_tab.rec
+        busy = bool(rec or self.rec_tab.processing or self.tr_tab.busy or self.conv_tab.busy)
+        if busy != self._awake:             # komputer nie zaśnie w trakcie nagrywania i obróbki
+            self._awake = busy
+            tray.keep_awake(busy)
+        if rec:
+            tip = f"● Nagrywanie {fmt_hms(rec.elapsed)} – {APP_NAME}"
+        elif self.rec_tab.processing:
+            tip = f"Obróbka nagrania… – {APP_NAME}"
+        elif self.tr_tab.busy:
+            tip = f"Transkrypcja… – {APP_NAME}"
+        elif self.conv_tab.busy:
+            tip = f"Konwersja… – {APP_NAME}"
+        else:
+            tip = APP_NAME
+        self.tray.update(tip, bool(rec))
+        if _INSTANCE.show_requested():      # ktoś uruchomił aplikację drugi raz
+            self.show_window()
 
     def toggle_on_top(self):
         self.cfg["always_on_top"] = not self.cfg["always_on_top"]
@@ -2377,6 +2501,7 @@ class App(ctk.CTk):
         try:
             self.rec_tab.blink_tick()
             self.tr_tab.tick()
+            self._tray_tick()
         except Exception:
             log_exc("slow tick")
         self.after(600, self._slow_tick)
@@ -2413,6 +2538,8 @@ class App(ctk.CTk):
             save_config(self.cfg)
         except Exception:
             pass
+        tray.keep_awake(False)
+        self.tray.stop()
         self.destroy()
 
 

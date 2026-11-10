@@ -44,7 +44,15 @@ dla tego pliku kroki, które już były, i pokazują to w jego wierszu. Dzięki 
 
 ## Ustawienia
 
-- **⚙ na samej górze**: ustawienia całej aplikacji (wygląd).
+- **⚙ na samej górze**: ustawienia całej aplikacji:
+  - wygląd,
+  - **zasobnik**: minimalizacja chowa okno do ikony obok zegara, opcjonalnie także krzyżyk. Kliknięcie ikony
+    przywraca okno, a w menu ikony są Nagrywaj/Zatrzymaj i Zakończ. Podczas nagrywania ikona ma czerwoną kropkę,
+    a po najechaniu pokazuje czas.
+  - **autostart z Windows**: wpis tylko dla Twojego konta, opcjonalnie od razu schowany w zasobniku.
+- Aplikacja działa tylko w jednej kopii: ponowne uruchomienie pokazuje okno już działającej.
+- Windows nie przyhamowuje aplikacji w tle (tryb wydajności jest dla niej wyłączony), a w trakcie nagrywania
+  i obróbki komputer nie przechodzi w uśpienie.
 - **📌 obok ⚙**: okno zawsze na wierzchu (włącz albo wyłącz jednym kliknięciem; aplikacja to zapamiętuje).
 - **⚙ Opcje w każdej zakładce**: ustawienia danego tematu. Pod listą widać ich podsumowanie, a kliknięcie je otwiera.
   - Nagrywanie: folder nagrań, jakość (24/32/48 kbps), obróbka po nagraniu, zachowanie surowego nagrania.

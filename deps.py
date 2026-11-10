@@ -31,6 +31,7 @@ PACKAGES = [
     ("numpy",          "numpy",          "obróbka dźwięku",                     "app"),
     ("pyaudiowpatch",  "PyAudioWPatch",  "nagrywanie mikrofonu i głośników",    "app"),
     ("av",             "av<19",          "zapis i konwersja do Opus",           "app"),
+    ("pystray",        "pystray",        "ikona w zasobniku",                   "app"),
     ("faster_whisper", "faster-whisper", "transkrypcja (silnik Whisper)",       "transkrypcja"),
     ("openvino_genai", "openvino-genai", "transkrypcja na grafice Intel (szybciej)", "transkrypcja"),
 ]

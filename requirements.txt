@@ -6,3 +6,4 @@ av<19            # faster-whisper 1.2.1 nie działa z av 19+
 # Transkrypcja (Whisper)
 faster-whisper
 openvino-genai   # opcjonalnie: szybka transkrypcja na grafice Intel
+pystray          # ikona w zasobniku
