@@ -272,7 +272,11 @@ class IGPUWhisper:
     pobiera się przy pierwszym użyciu."""
 
     SR = 16000
-    PORTION_S = 120        # ile sekund mowy wysyłać do GPU naraz
+    # Ile sekund mowy wysyłać do GPU naraz. Najwyżej jedno okno Whispera (30 s), cięte zawsze w ciszy (VAD).
+    # Przy 120 s OpenVINO samo dzieliło porcję na okna 30 s w przypadkowych miejscach i gubiło całe wypowiedzi:
+    # test 2026-11-09 z ręczną transkrypcją (3 min) – 120 s: WER 30,9%, 58 pominiętych słów;
+    # 28 s: WER 24,4%, 22 pominięte (procesor beam 2: 29,1%, 51); czas +14%.
+    PORTION_S = 28
     RETRY_S = 5            # mowa (po VAD) tak długa bez tekstu albo z za małą liczbą słów = transkrybuj ponownie
     MIN_WORDS_PER_S = 0.5  # normalna mowa to ok. 2 słowa/s
 
