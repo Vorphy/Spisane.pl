@@ -1376,7 +1376,7 @@ class TranscribeOptions(ctk.CTkToplevel):
             self.compute_hint.configure(text="Grafika Intel: model jest zawsze int8 (tak go przygotowano pod OpenVINO).")
             self.beam_hint.configure(text="Grafika Intel obsługuje tylko beam 1 – OpenVINO nie ma beam search na GPU. "
                                           "Fragmenty pominięte przez model nadrabia weryfikacja VAD. "
-                                          "Wyższy beam (np. 2 dla ważnych nagrań): wybierz Procesor.")
+                                          "Wyższy beam: Grafika Vulkan (beam 2, prawie tak szybka) albo Procesor.")
         elif real == "vulkan":
             self.compute_hint.configure(text="Grafika Vulkan: model q8_0 (whisper.cpp) – w teście tak samo dokładny "
                                              "jak pełny, a dwa razy mniejszy.")
